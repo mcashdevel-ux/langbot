@@ -14,8 +14,21 @@ htmlcov/
 .pytest_cache/
 coverage.xml
 
-# Agent runtime data
+# Secrets / credential vault — never commit
+memory/
 memory/vault/
+*.masterkey
+credentials.json
+metadata.json
+.env
+.env.*
+
+# Agent state
 agent_checkpoints.db
+agent_checkpoints.db-*
 agent_memory_chroma/
+.sage_history
+
+# Scratch files
+agent_scratch/
 /tmp/agent_scratch/

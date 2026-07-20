@@ -36,6 +36,8 @@ import threading
 from pathlib import Path
 from typing import Dict, Optional, List, Any, Tuple
 
+from utils import atomic_write_json
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -91,6 +93,12 @@ def _derive_keys(master_key: bytes, salt: bytes) -> Tuple[bytes, bytes]:
     """Derive encryption key and MAC key from master key using PBKDF2."""
     dk = hashlib.pbkdf2_hmac('sha256', master_key, salt, PBKDF2_ITERATIONS, dklen=KEY_SIZE * 2)
     return dk[:KEY_SIZE], dk[KEY_SIZE:]
+
+
+def _derive_password_key(password: str, salt: bytes) -> bytes:
+    """Derive a single wrapping key from a password using PBKDF2."""
+    return hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'),
+                               salt, PBKDF2_ITERATIONS, dklen=KEY_SIZE)
 
 
 def _sha256_ctr_encrypt(enc_key: bytes, nonce: bytes, plaintext: bytes) -> bytes:
@@ -161,6 +169,22 @@ def generate_master_key() -> bytes:
     return os.urandom(KEY_SIZE)
 
 
+def _restrict_dir_permissions(path: Path) -> None:
+    """Best-effort restrict a directory to owner-only access (0700)."""
+    try:
+        os.chmod(path, 0o700)
+    except OSError as e:
+        logger.warning(f"Could not restrict permissions on {path}: {e}")
+
+
+def _restrict_file_permissions(path: str) -> None:
+    """Best-effort restrict a file to owner read/write only (0600)."""
+    try:
+        os.chmod(path, 0o600)
+    except OSError as e:
+        logger.warning(f"Could not restrict permissions on {path}: {e}")
+
+
 # ---------------------------------------------------------------------------
 # Vault Store — persistence layer
 # ---------------------------------------------------------------------------
@@ -185,14 +209,14 @@ class VaultStore:
                 return "Vault already initialized. Use vault_status() to check."
 
             VAULT_DIR.mkdir(parents=True, exist_ok=True)
+            _restrict_dir_permissions(VAULT_DIR)
             self._master_key = generate_master_key()
 
             if password:
                 # If password provided, encrypt master key with password-derived key
                 # This enables "unlock with password" pattern
                 salt = os.urandom(NONCE_SIZE)
-                pwd_key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'),
-                                               salt, PBKDF2_ITERATIONS, dklen=KEY_SIZE)
+                pwd_key = _derive_password_key(password, salt)
                 # Encrypt master key with password-derived key
                 wrapped = encrypt_value(pwd_key, self._master_key.hex())
                 key_data = {
@@ -209,12 +233,8 @@ class VaultStore:
                     "key": base64.urlsafe_b64encode(self._master_key).decode('ascii'),
                 }
 
-            import tempfile
-            _tmp = tempfile.NamedTemporaryFile(mode="w", delete=False,
-                                                dir=str(VAULT_DIR), suffix=".tmp")
-            with _tmp:
-                json.dump(key_data, _tmp, indent=2)
-            os.replace(_tmp.name, str(MASTERKEY_FILE))
+            atomic_write_json(MASTERKEY_FILE, key_data)
+            _restrict_file_permissions(str(MASTERKEY_FILE))
 
             self._save_credentials()
             self._save_metadata()
@@ -247,8 +267,7 @@ class VaultStore:
                     logger.warning("Password required to unlock vault")
                     return False
                 salt = base64.urlsafe_b64decode(key_data["salt"].encode('ascii'))
-                pwd_key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'),
-                                               salt, PBKDF2_ITERATIONS, dklen=KEY_SIZE)
+                pwd_key = _derive_password_key(password, salt)
                 hex_key = decrypt_value(pwd_key, key_data["wrapped_key"])
                 if hex_key is None:
                     logger.warning("Wrong password")
@@ -375,34 +394,26 @@ class VaultStore:
     def _save_credentials(self):
         """Save encrypted credentials blob."""
         try:
-            VAULT_DIR.mkdir(parents=True, exist_ok=True)
-            import tempfile
-            _tmp = tempfile.NamedTemporaryFile(mode="w", delete=False,
-                                                dir=str(VAULT_DIR), suffix=".tmp")
-            with _tmp:
-                json.dump({
-                    "version": 1,
-                    "updated_at": time.time(),
-                    "credentials": self._credentials,
-                }, _tmp, indent=2)
-            os.replace(_tmp.name, str(CREDENTIALS_FILE))
+            _restrict_dir_permissions(VAULT_DIR)
+            atomic_write_json(CREDENTIALS_FILE, {
+                "version": 1,
+                "updated_at": time.time(),
+                "credentials": self._credentials,
+            })
+            _restrict_file_permissions(str(CREDENTIALS_FILE))
         except Exception as e:
             logger.warning(f"Failed to save credentials: {e}")
 
     def _save_metadata(self):
         """Save credential metadata (names, timestamps, no values)."""
         try:
-            VAULT_DIR.mkdir(parents=True, exist_ok=True)
-            import tempfile
-            _tmp = tempfile.NamedTemporaryFile(mode="w", delete=False,
-                                                dir=str(VAULT_DIR), suffix=".tmp")
-            with _tmp:
-                json.dump({
-                    "version": 1,
-                    "updated_at": time.time(),
-                    "credentials": list(self._metadata.values()),
-                }, _tmp, indent=2)
-            os.replace(_tmp.name, str(METADATA_FILE))
+            _restrict_dir_permissions(VAULT_DIR)
+            atomic_write_json(METADATA_FILE, {
+                "version": 1,
+                "updated_at": time.time(),
+                "credentials": list(self._metadata.values()),
+            })
+            _restrict_file_permissions(str(METADATA_FILE))
         except Exception as e:
             logger.warning(f"Failed to save metadata: {e}")
 
