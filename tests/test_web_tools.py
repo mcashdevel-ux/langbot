@@ -9,7 +9,7 @@ import os
 
 import pytest
 
-import web_tools
+import components.web_tools as web_tools
 
 
 @pytest.fixture(autouse=True)

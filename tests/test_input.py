@@ -9,7 +9,7 @@ import sys
 
 import pytest
 
-import input as inp
+import components.input as inp
 
 
 # ---------------------------------------------------------------------------

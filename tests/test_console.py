@@ -6,7 +6,7 @@ helpers (captured via capsys). Colorama may or may not be installed; tests
 assert on behaviour that holds either way (e.g. by stripping ANSI).
 """
 
-import console
+import components.console as console
 
 
 # ---------------------------------------------------------------------------

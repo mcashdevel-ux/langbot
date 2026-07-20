@@ -9,7 +9,7 @@ import types
 import httpx
 import pytest
 
-import engines
+import components.engines as engines
 
 
 # ---------------------------------------------------------------------------
