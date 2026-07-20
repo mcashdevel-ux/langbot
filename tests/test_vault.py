@@ -8,6 +8,7 @@ never touch the real ``memory/vault`` folder.
 """
 
 import base64
+import os
 
 import pytest
 
@@ -69,9 +70,11 @@ class TestEncryption:
     def test_decrypt_tampered_blob_returns_none(self):
         key = vault.generate_master_key()
         blob = vault.encrypt_value(key, "secret")
-        raw = bytearray(base64.urlsafe_b64decode(blob.encode()))
-        raw[-1] ^= 0xFF  # flip a byte in the MAC tag
-        tampered = base64.urlsafe_b64encode(bytes(raw)).decode()
+        # Blobs are "v2:"-prefixed AES-GCM; manipulate the base64 payload only.
+        prefix, b64 = blob[:len(vault.V2_PREFIX)], blob[len(vault.V2_PREFIX):]
+        raw = bytearray(base64.urlsafe_b64decode(b64.encode()))
+        raw[-1] ^= 0xFF  # flip a byte in the GCM tag
+        tampered = prefix + base64.urlsafe_b64encode(bytes(raw)).decode()
         assert vault.decrypt_value(key, tampered) is None
 
     def test_decrypt_too_short_blob_returns_none(self):
@@ -86,10 +89,11 @@ class TestEncryption:
         assert len(vault.generate_master_key()) == vault.KEY_SIZE
 
     def test_ctr_cipher_is_symmetric(self):
+        # Legacy SHA256-CTR keystream XOR is symmetric (encrypt == decrypt).
         key = b"k" * 32
         nonce = b"n" * 16
-        ct = vault._sha256_ctr_encrypt(key, nonce, b"plaintext data")
-        assert vault._sha256_ctr_decrypt(key, nonce, ct) == b"plaintext data"
+        ct = vault._sha256_ctr_crypt(key, nonce, b"plaintext data")
+        assert vault._sha256_ctr_crypt(key, nonce, ct) == b"plaintext data"
 
     def test_empty_string_roundtrip(self):
         key = vault.generate_master_key()
@@ -424,3 +428,56 @@ class TestPluginLifecycle:
         )
         # Credential-management tool names are exempt from redaction refresh.
         vault._output_redactor("get_credential", {}, "result")
+
+    def test_output_redactor_returns_redacted_result(self, vault_dir):
+        agent = _FakeAgent()
+        vault.register(agent)
+        vault._store.init_vault()
+        vault._store.put("SECRET", "longsecretvalue")
+        out = vault._output_redactor("some_tool", {}, "leaked longsecretvalue here")
+        assert "longsecretvalue" not in out
+        assert "SECRET_REDACTED" in out
+
+
+# ---------------------------------------------------------------------------
+# LangGraph adapter API (bootstrap / run_action / redact)
+# ---------------------------------------------------------------------------
+
+class TestLangGraphAdapter:
+    @pytest.fixture(autouse=True)
+    def _reset_globals(self, vault_dir, monkeypatch):
+        # bootstrap() uses module-level singletons; reset them per test.
+        monkeypatch.setattr(vault, "_store", None)
+        monkeypatch.setattr(vault, "_redactor", None)
+        monkeypatch.setattr(vault, "_ENV_LOADED", [])
+
+    def test_bootstrap_autoinits_and_loads_env(self, monkeypatch):
+        monkeypatch.delenv("MY_KEY", raising=False)
+        assert vault.bootstrap() == []          # fresh vault, nothing stored
+        vault.run_action("store", "MY_KEY", "abc123value")
+        # A subsequent bootstrap (e.g. new process) exports it to the env.
+        monkeypatch.delenv("MY_KEY", raising=False)
+        loaded = vault.bootstrap()
+        assert "MY_KEY" in loaded
+        assert os.environ["MY_KEY"] == "abc123value"
+
+    def test_redact_before_bootstrap_is_noop(self):
+        assert vault.redact("nothing to redact") == "nothing to redact"
+
+    def test_redact_scrubs_stored_values(self):
+        vault.bootstrap()
+        vault.run_action("store", "TOKEN", "secretTokenXYZ")
+        assert "secretTokenXYZ" not in vault.redact("here: secretTokenXYZ end")
+
+    def test_redact_prefers_longer_values(self):
+        vault.bootstrap()
+        vault.run_action("store", "SHORT", "abcd")
+        vault.run_action("store", "LONG", "abcdefgh")
+        out = vault.redact("value abcdefgh here")
+        # The longer secret must be fully masked, not partially by the shorter.
+        assert "LONG_REDACTED" in out
+        assert "efgh" not in out
+
+    def test_run_action_unknown(self):
+        vault.bootstrap()
+        assert "Unknown vault action" in vault.run_action("frobnicate")
