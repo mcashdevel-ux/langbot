@@ -64,7 +64,10 @@ _VAULT_ENV_LOADED = _vault_bootstrap()
 # ------------------------------------------------------------------------------
 # 1. LLM & Embeddings
 # ------------------------------------------------------------------------------
-llm = ChatOpenAI(model=LLM_MODEL, base_url=BASE_URL, api_key="not-needed", temperature=0.1)
+llm = ChatOpenAI(model=LLM_MODEL, base_url=BASE_URL, api_key="not-needed", temperature=0.1, max_tokens=2048)
+
+# Distillation LLM for knowledge extraction (lower limit to prevent long outputs)
+llm_distill = ChatOpenAI(model=LLM_MODEL, base_url=BASE_URL, api_key="not-needed", temperature=0.1, max_tokens=1024)
 
 def _load_embeddings():
     """Construct the embedding model without leaking its loading progress bars
@@ -274,7 +277,7 @@ Return ONLY a JSON array of strings, each a standalone factual statement. If not
 Do not include explanations, markdown, or extra text.
 """
     try:
-        raw = llm.invoke(distillation_prompt).content.strip()
+        raw = llm_distill.invoke(distillation_prompt).content.strip()
         # Remove possible markdown fences
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1]
