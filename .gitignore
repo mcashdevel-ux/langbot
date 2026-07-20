@@ -1,5 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtualenvs
+.venv/
+venv/
+
+# Test / coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+coverage.xml
+
 # Secrets / credential vault — never commit
 memory/
+memory/vault/
 *.masterkey
 credentials.json
 metadata.json
@@ -14,10 +31,4 @@ agent_memory_chroma/
 
 # Scratch files
 agent_scratch/
-
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.venv/
-venv/
+/tmp/agent_scratch/
