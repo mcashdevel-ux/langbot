@@ -2,6 +2,7 @@ import os
 import subprocess
 import json
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from langchain_core.tools import tool
@@ -62,7 +63,7 @@ def _store_memory(text: str) -> str:
     memory_collection.add(
         ids=[mem_id],
         embeddings=[vector],
-        metadatas=[{"text": text, "timestamp": subprocess.getoutput("date -u +%Y-%m-%dT%H:%M:%SZ")}],
+        metadatas=[{"text": text, "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}],
     )
     return mem_id
 
