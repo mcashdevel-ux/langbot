@@ -27,9 +27,13 @@ long-term memory (Chroma + sentence-transformers).
   store, exposed as the `vault` tool (`store`/`get`/`list`/`remove`/`status`). Stored
   credentials are auto-loaded into the environment at startup, and their values are
   automatically **redacted** from other tools' output before it re-enters the model.
-- **Terminal UX** — `components/input.py` (readline history, multi-line paste detection,
-  Esc-to-cancel) and `components/console.py` (colored output, banners, spinners) power the
-  interactive REPL.
+- **Terminal UX** — `components/input.py` (readline history, arrow-key editing, multi-line
+  paste detection, Esc-to-cancel) and `components/console.py` (colored output, banners,
+  spinners) power the interactive REPL. Every step of a turn — agent thoughts, tool calls,
+  tool results and the final answer — streams to the console as its own Rich panel the moment
+  it is produced, and the final answer is rendered as Markdown. Ctrl+C interrupts the current
+  turn and returns to the prompt; Ctrl+D (or `quit`/`exit`) ends the session. The embedding
+  model loads quietly (its `Loading weights` progress bars are suppressed).
 
 ## Requirements
 

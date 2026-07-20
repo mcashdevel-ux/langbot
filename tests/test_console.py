@@ -348,6 +348,58 @@ class TestPanel:
 
 
 # ---------------------------------------------------------------------------
+# Streaming panels
+# ---------------------------------------------------------------------------
+
+class TestStreamingPanels:
+    def test_thought_panel_renders(self, capsys):
+        console.thought_panel("planning the next step")
+        assert "planning the next step" in console.strip_ansi(capsys.readouterr().out)
+
+    def test_thought_panel_empty_silent(self, capsys):
+        console.thought_panel("   ")
+        assert capsys.readouterr().out == ""
+
+    def test_tool_call_panel_with_args(self, capsys):
+        console.tool_call_panel("execute_shell_command", {"command": "ls -la"})
+        out = console.strip_ansi(capsys.readouterr().out)
+        assert "execute_shell_command" in out and "ls -la" in out
+
+    def test_tool_call_panel_no_args(self, capsys):
+        console.tool_call_panel("recall")
+        out = console.strip_ansi(capsys.readouterr().out)
+        assert "recall" in out and "no arguments" in out
+
+    def test_tool_call_panel_truncates_long_arg(self, capsys):
+        console.tool_call_panel("write_any_file", {"content": "z" * 400})
+        assert "..." in console.strip_ansi(capsys.readouterr().out)
+
+    def test_tool_result_panel_ok(self, capsys):
+        console.tool_result_panel("read_any_file", "hello file")
+        assert "hello file" in console.strip_ansi(capsys.readouterr().out)
+
+    def test_tool_result_panel_error(self, capsys):
+        console.tool_result_panel("read_any_file", "boom", is_error=True)
+        assert "boom" in console.strip_ansi(capsys.readouterr().out)
+
+    def test_tool_result_panel_empty_shows_placeholder(self, capsys):
+        console.tool_result_panel("execute_shell_command", "")
+        assert "no output" in console.strip_ansi(capsys.readouterr().out)
+
+    def test_tool_result_panel_truncates_large(self, capsys):
+        console.tool_result_panel("read_any_file", "y" * 5000)
+        assert "5,000 total chars" in console.strip_ansi(capsys.readouterr().out)
+
+    def test_final_answer_panel_renders_markdown(self, capsys):
+        console.final_answer_panel("**bold** answer")
+        assert "bold" in console.strip_ansi(capsys.readouterr().out)
+
+    def test_final_answer_panel_empty_silent(self, capsys):
+        console.final_answer_panel("")
+        assert capsys.readouterr().out == ""
+
+
+# ---------------------------------------------------------------------------
 # Unicode safety
 # ---------------------------------------------------------------------------
 

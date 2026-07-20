@@ -522,7 +522,7 @@ def knowledge_hint(count: int):
 
 def startup_tip(model: str = ""):
     model_str = f" \u2014 {model}" if model else ""
-    _write(f"  {Fore.CYAN}{Style.DIM}Type /help for commands.  Esc+Enter cancels.  Ctrl+C twice exits.{Style.RESET_ALL}")
+    _write(f"  {Fore.CYAN}{Style.DIM}Type /help for commands.  Ctrl+C interrupts the current task.  Ctrl+D or 'quit' exits.{Style.RESET_ALL}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -702,6 +702,65 @@ def panel(title: str = "", content: str = "", border_style: str = "green",
                 sys.stdout.flush()
             except Exception:
                 pass
+
+
+# ═══════════════════════════════════════════════════════════════
+# Streaming panels — agent thought / tool call / tool result / answer
+#
+# Each turn of the agent is surfaced live as a self-contained Rich panel the
+# moment it is produced (see langbot.run_repl). Panels degrade gracefully to
+# box-drawing output when Rich is unavailable.
+# ═══════════════════════════════════════════════════════════════
+
+# How much of a (potentially huge) tool result to show inside its panel.
+_TOOL_RESULT_PREVIEW = 2000
+
+
+def thought_panel(content: str):
+    """Render an intermediate agent reasoning message."""
+    if not content or not content.strip():
+        return
+    panel(title="\U0001f4ad Thought", content=content.strip(),
+          border_style="magenta", render_md=True)
+
+
+def tool_call_panel(name: str, args: dict = None):
+    """Render a tool invocation (name + arguments) as it is requested."""
+    icon, _ = _tool_icon(name)
+    if args:
+        parts = []
+        for k, v in args.items():
+            vs = str(v)
+            if len(vs) > 200:
+                vs = vs[:197] + "..."
+            parts.append(f"{k} = {vs}")
+        body = "\n".join(parts)
+    else:
+        body = "(no arguments)"
+    panel(title=f"{icon} Tool Call \u00b7 {name}", content=body,
+          border_style="yellow")
+
+
+def tool_result_panel(name: str, content: str, is_error: bool = False):
+    """Render the (possibly truncated) result returned by a tool."""
+    icon, _ = _tool_icon(name)
+    text = content if isinstance(content, str) else str(content)
+    full_len = len(text)
+    if full_len > _TOOL_RESULT_PREVIEW:
+        text = text[:_TOOL_RESULT_PREVIEW] + f"\n\n... [{full_len:,} total chars]"
+    if not text.strip():
+        text = "(no output)"
+    status = "\u2717" if is_error else "\u2713"
+    panel(title=f"{status} {icon} {name}", content=text,
+          border_style="red" if is_error else "blue")
+
+
+def final_answer_panel(content: str):
+    """Render the agent's final answer with full Markdown formatting."""
+    if not content or not content.strip():
+        return
+    panel(title="\U0001f4ac Answer", content=content.strip(),
+          border_style="green", render_md=True)
 
 
 def md_print(text: str):
