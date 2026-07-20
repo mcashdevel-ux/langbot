@@ -41,9 +41,17 @@ def save_to_scratch(content: str, prefix: str = "doc") -> str:
     return sid
 
 
+_SCRATCH_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
 def read_scratch(scratch_id: str, offset: int = 0, length: int = 1500) -> str:
     """Page through a previously saved search/fetch result."""
+    if not scratch_id or not _SCRATCH_ID_RE.match(scratch_id):
+        return f"(invalid scratch id '{scratch_id}')"
     path = os.path.join(SCRATCH_DIR, f"{scratch_id}.txt")
+    # Defense in depth: ensure the resolved path stays inside SCRATCH_DIR.
+    if os.path.commonpath([os.path.realpath(path), os.path.realpath(SCRATCH_DIR)]) != os.path.realpath(SCRATCH_DIR):
+        return f"(invalid scratch id '{scratch_id}')"
     if not os.path.exists(path):
         return f"(no scratch entry found for id '{scratch_id}')"
     with open(path, "r", encoding="utf-8") as f:

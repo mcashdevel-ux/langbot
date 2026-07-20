@@ -1,0 +1,23 @@
+# Secrets / credential vault — never commit
+memory/
+*.masterkey
+credentials.json
+metadata.json
+.env
+.env.*
+
+# Agent state
+agent_checkpoints.db
+agent_checkpoints.db-*
+agent_memory_chroma/
+.sage_history
+
+# Scratch files
+agent_scratch/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/

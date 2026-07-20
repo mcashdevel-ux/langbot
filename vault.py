@@ -161,6 +161,22 @@ def generate_master_key() -> bytes:
     return os.urandom(KEY_SIZE)
 
 
+def _restrict_dir_permissions(path: Path) -> None:
+    """Best-effort restrict a directory to owner-only access (0700)."""
+    try:
+        os.chmod(path, 0o700)
+    except OSError as e:
+        logger.warning(f"Could not restrict permissions on {path}: {e}")
+
+
+def _restrict_file_permissions(path: str) -> None:
+    """Best-effort restrict a file to owner read/write only (0600)."""
+    try:
+        os.chmod(path, 0o600)
+    except OSError as e:
+        logger.warning(f"Could not restrict permissions on {path}: {e}")
+
+
 # ---------------------------------------------------------------------------
 # Vault Store — persistence layer
 # ---------------------------------------------------------------------------
@@ -185,6 +201,7 @@ class VaultStore:
                 return "Vault already initialized. Use vault_status() to check."
 
             VAULT_DIR.mkdir(parents=True, exist_ok=True)
+            _restrict_dir_permissions(VAULT_DIR)
             self._master_key = generate_master_key()
 
             if password:
@@ -215,6 +232,7 @@ class VaultStore:
             with _tmp:
                 json.dump(key_data, _tmp, indent=2)
             os.replace(_tmp.name, str(MASTERKEY_FILE))
+            _restrict_file_permissions(str(MASTERKEY_FILE))
 
             self._save_credentials()
             self._save_metadata()
@@ -376,6 +394,7 @@ class VaultStore:
         """Save encrypted credentials blob."""
         try:
             VAULT_DIR.mkdir(parents=True, exist_ok=True)
+            _restrict_dir_permissions(VAULT_DIR)
             import tempfile
             _tmp = tempfile.NamedTemporaryFile(mode="w", delete=False,
                                                 dir=str(VAULT_DIR), suffix=".tmp")
@@ -386,6 +405,7 @@ class VaultStore:
                     "credentials": self._credentials,
                 }, _tmp, indent=2)
             os.replace(_tmp.name, str(CREDENTIALS_FILE))
+            _restrict_file_permissions(str(CREDENTIALS_FILE))
         except Exception as e:
             logger.warning(f"Failed to save credentials: {e}")
 
@@ -393,6 +413,7 @@ class VaultStore:
         """Save credential metadata (names, timestamps, no values)."""
         try:
             VAULT_DIR.mkdir(parents=True, exist_ok=True)
+            _restrict_dir_permissions(VAULT_DIR)
             import tempfile
             _tmp = tempfile.NamedTemporaryFile(mode="w", delete=False,
                                                 dir=str(VAULT_DIR), suffix=".tmp")
@@ -403,6 +424,7 @@ class VaultStore:
                     "credentials": list(self._metadata.values()),
                 }, _tmp, indent=2)
             os.replace(_tmp.name, str(METADATA_FILE))
+            _restrict_file_permissions(str(METADATA_FILE))
         except Exception as e:
             logger.warning(f"Failed to save metadata: {e}")
 
