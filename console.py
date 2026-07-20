@@ -42,6 +42,15 @@ else:
     class Style:
         BRIGHT = DIM = NORMAL = RESET_ALL = ''
 
+# ── Box-drawing / rule characters ──
+# Kept as named constants so they can be referenced inside f-string expressions
+# on Python < 3.12, which forbids backslashes in the expression part of f-strings.
+_HLINE = "\u2500"        # ─
+_DLINE = "\u2550"        # ═
+_MIDDOT = "\u00b7"       # ·
+_BLOCK_FULL = "\u2588"   # █
+_BLOCK_LIGHT = "\u2591"  # ░
+
 # ── Short ANSI aliases ──
 G = Fore.GREEN
 Y = Fore.YELLOW
@@ -140,18 +149,18 @@ def rule(text: str = ""):
     if text:
         t = f" {text} "
         pad = (w - ansi_len(t) - 2) // 2
-        _write(f"  {Fore.MAGENTA}{'\u2500' * pad}{Style.RESET_ALL}"
+        _write(f"  {Fore.MAGENTA}{_HLINE * pad}{Style.RESET_ALL}"
                f"{Fore.WHITE}{Style.BRIGHT}{t}{Style.RESET_ALL}"
-               f"{Fore.MAGENTA}{'\u2500' * pad}{Style.RESET_ALL}")
+               f"{Fore.MAGENTA}{_HLINE * pad}{Style.RESET_ALL}")
     else:
-        _write(f"  {Fore.MAGENTA}{'\u2500' * (w - 2)}{Style.RESET_ALL}")
+        _write(f"  {Fore.MAGENTA}{_HLINE * (w - 2)}{Style.RESET_ALL}")
 
 
 def header(msg: str):
     w = _term_w()
-    _write(f"\n  {Fore.MAGENTA}{'\u2550' * (w - 2)}{Style.RESET_ALL}")
+    _write(f"\n  {Fore.MAGENTA}{_DLINE * (w - 2)}{Style.RESET_ALL}")
     _write(f"  {Fore.WHITE}{Style.BRIGHT}{msg}{Style.RESET_ALL}")
-    _write(f"  {Fore.MAGENTA}{'\u2550' * (w - 2)}{Style.RESET_ALL}")
+    _write(f"  {Fore.MAGENTA}{_DLINE * (w - 2)}{Style.RESET_ALL}")
 
 
 def blank():
@@ -160,7 +169,7 @@ def blank():
 
 def separator():
     w = _term_w()
-    _write(f"  {Fore.MAGENTA}{'\u00b7' * (w - 2)}{Style.RESET_ALL}")
+    _write(f"  {Fore.MAGENTA}{_MIDDOT * (w - 2)}{Style.RESET_ALL}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -171,7 +180,7 @@ def banner(title: str, subtitle: str = ""):
     w = _term_w()
     inner = w - 4
     lines = [
-        f"\n  {Fore.MAGENTA}\u2554{'\u2550' * inner}\u2557{Style.RESET_ALL}",
+        f"\n  {Fore.MAGENTA}\u2554{_DLINE * inner}\u2557{Style.RESET_ALL}",
         f"  {Fore.MAGENTA}\u2551{Style.RESET_ALL}"
         f"{Fore.WHITE}{Style.BRIGHT}{title:^{inner}}{Style.RESET_ALL}"
         f"{Fore.MAGENTA}\u2551{Style.RESET_ALL}",
@@ -181,7 +190,7 @@ def banner(title: str, subtitle: str = ""):
         lines.insert(3, f"  {Fore.MAGENTA}\u2551{Style.RESET_ALL}"
                         f"{Fore.CYAN}{subtitle:^{inner}}{Style.RESET_ALL}"
                         f"{Fore.MAGENTA}\u2551{Style.RESET_ALL}")
-    lines.append(f"  {Fore.MAGENTA}\u255a{'\u2550' * inner}\u255d{Style.RESET_ALL}")
+    lines.append(f"  {Fore.MAGENTA}\u255a{_DLINE * inner}\u255d{Style.RESET_ALL}")
     _write('\n'.join(lines))
 
 
@@ -261,7 +270,7 @@ def agent_response(content: str, label: str = "Agent"):
     is_thought = "thought" in label.lower()
     if is_thought:
         _write(f"  {Fore.MAGENTA}{Style.BRIGHT}{label}{Style.RESET_ALL}")
-        _write(f"  {Fore.MAGENTA}{'\u2500' * min(_term_w() - 4, 50)}{Style.RESET_ALL}")
+        _write(f"  {Fore.MAGENTA}{_HLINE * min(_term_w() - 4, 50)}{Style.RESET_ALL}")
         for line in content.strip().split("\n"):
             _write(f"  {line.strip()}")
     else:
@@ -318,10 +327,10 @@ def table(rows: list[list], headers: list[str] = None):
 # ═══════════════════════════════════════════════════════════════
 
 def code(text: str, lang: str = ""):
-    _write(f"  {Fore.YELLOW}{'\u2500' * (_term_w() - 4)}{Style.RESET_ALL}")
+    _write(f"  {Fore.YELLOW}{_HLINE * (_term_w() - 4)}{Style.RESET_ALL}")
     for line in text.strip().split('\n'):
         _write(f"  {Fore.YELLOW}{line}{Style.RESET_ALL}")
-    _write(f"  {Fore.YELLOW}{'\u2500' * (_term_w() - 4)}{Style.RESET_ALL}")
+    _write(f"  {Fore.YELLOW}{_HLINE * (_term_w() - 4)}{Style.RESET_ALL}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -339,7 +348,7 @@ def progress_bar(value: float, width: int = 20, label: str = "") -> str:
         color = Fore.YELLOW
     else:
         color = Fore.CYAN
-    bar = f"{color}{'\u2588' * filled}{Style.RESET_ALL}{'\u2591' * empty}"
+    bar = f"{color}{_BLOCK_FULL * filled}{Style.RESET_ALL}{_BLOCK_LIGHT * empty}"
     result = f"  {bar} {color}{pct}%{Style.RESET_ALL}"
     if label:
         result += f"  {Fore.WHITE}{label}{Style.RESET_ALL}"
@@ -489,11 +498,11 @@ def session_resume_banner(msg_count: int, knowledge_count: int = 0, is_truncated
     if is_truncated:
         subtitle += f" (showing last {msg_count})"
     lines = [
-        f"  {Fore.GREEN}\u2554{'\u2550' * inner}\u2557{Style.RESET_ALL}",
+        f"  {Fore.GREEN}\u2554{_DLINE * inner}\u2557{Style.RESET_ALL}",
         f"  {Fore.GREEN}\u2551{Style.RESET_ALL}"
         f"{Fore.WHITE}{Style.BRIGHT}{subtitle:^{inner}}{Style.RESET_ALL}"
         f"{Fore.GREEN}\u2551{Style.RESET_ALL}",
-        f"  {Fore.GREEN}\u255a{'\u2550' * inner}\u255d{Style.RESET_ALL}",
+        f"  {Fore.GREEN}\u255a{_DLINE * inner}\u255d{Style.RESET_ALL}",
     ]
     _write('\n'.join(lines))
 

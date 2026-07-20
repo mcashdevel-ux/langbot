@@ -23,19 +23,16 @@ long-term memory (Chroma + sentence-transformers).
   directly (no SearXNG web app), supporting many search engines.
 - **Conversation persistence** — LangGraph SQLite checkpointer when
   `langgraph-checkpoint-sqlite` is installed, else in-memory.
-
-### Not currently wired in
-
-`vault.py` (encrypted credential vault), `input.py` (readline UX), and `console.py`
-(rich terminal UI) target a different plugin framework (`agent.register_tool`,
-`agent._tool_observers`) and are **not imported by `langbot.py`**. They ship as standalone
-modules; integrating them requires an adapter. See `CODE_REVIEW.md` for details and known
-issues before relying on them.
+- **Encrypted credential vault** (`vault.py`) — AES-256-GCM encrypted secrets store,
+  exposed as the `vault` tool (`store`/`get`/`list`/`remove`/`status`). Stored
+  credentials are auto-loaded into the environment at startup, and their values are
+  automatically **redacted** from other tools' output before it re-enters the model.
+- **Terminal UX** — `input.py` (readline history, multi-line paste detection, Esc-to-cancel)
+  and `console.py` (colored output, banners, spinners) power the interactive REPL.
 
 ## Requirements
 
-- **Python 3.12+** (required — `console.py` uses f-string syntax introduced in 3.12; see
-  `CODE_REVIEW.md` C1).
+- **Python 3.10+** (the code uses `X | None` type syntax).
 - A local OpenAI-compatible LLM server (default `http://127.0.0.1:8080/v1`).
 
 ### Python dependencies
@@ -47,7 +44,7 @@ pip install \
   langchain-core langchain-openai langchain-huggingface \
   langgraph langgraph-checkpoint-sqlite \
   chromadb sentence-transformers \
-  requests httpx colorama rich
+  cryptography requests httpx colorama rich
 ```
 
 `engines.py` additionally needs the SearXNG source on disk. Place it at one of
@@ -75,6 +72,8 @@ Environment variables:
   `/etc/searxng/settings.yml`, then the source's bundled settings).
 - `AGENT_SCRATCH_DIR` — where web scratch files are written (default `/tmp/agent_scratch`;
   note `/tmp` may be cleared between reboots).
+- `LANGBOT_VAULT_PASSWORD` — if set, the vault master key is wrapped with a
+  password-derived key instead of being stored in recoverable form on disk.
 
 ## Usage
 
@@ -96,15 +95,16 @@ runs via the SQLite checkpointer.
 ### Available tools
 
 `execute_shell_command`, `read_any_file`, `write_any_file`, `search_web`, `fetch_url`,
-`read_scratch`, `remember`, `recall`.
+`read_scratch`, `remember`, `recall`, `vault`.
 
 ## Security notes
 
 - The agent can run **arbitrary shell commands** and read/write **any file**. Treat it as
   giving the model a shell on your machine. Run only in a sandbox/VM you control.
-- The credential vault (`vault.py`), if you integrate it, currently stores its master key
-  in plaintext next to the ciphertext by default and its output-redaction is a no-op — see
-  `CODE_REVIEW.md` (C2/C3) before using it to hold real secrets.
+- The credential vault encrypts values with AES-256-GCM and restricts its files to
+  `0600`. By default the master key is stored (file-protected) alongside the ciphertext,
+  so encryption at rest primarily protects against other users on the host; set
+  `LANGBOT_VAULT_PASSWORD` for password-wrapped key protection.
 
 ## Project layout
 
@@ -112,13 +112,14 @@ runs via the SQLite checkpointer.
 langbot.py    # agent loop, tools, memory, LangGraph wiring (entrypoint)
 web_tools.py  # search_web / fetch_url / read_scratch (scratchpad-backed)
 engines.py    # SearXNG engine adapter used by web_tools
-vault.py      # encrypted credential vault (standalone; not wired in)
-input.py      # readline input UX (standalone; not wired in)
-console.py    # terminal UI helpers (standalone; not wired in)
+vault.py      # AES-256-GCM credential vault (the `vault` tool + env auto-load + redaction)
+input.py      # readline input UX used by the REPL
+console.py    # terminal UI helpers used by the REPL
 CODE_REVIEW.md# review of the initial commit with known issues + fixes
 ```
 
 ## Known issues
 
-See [`CODE_REVIEW.md`](./CODE_REVIEW.md) for a full list, including the Python 3.12
-requirement, the vault crypto/redaction issues, and the `read_scratch` non-ASCII bug.
+See [`CODE_REVIEW.md`](./CODE_REVIEW.md) for the original review. Several items have since
+been addressed (console 3.12 import break, vault AES-GCM migration + `0600` perms, active
+output redaction, `read_scratch` handling).

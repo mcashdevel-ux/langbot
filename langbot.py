@@ -29,6 +29,15 @@ from chromadb.config import Settings
 from web_tools import search_web as _search_web, fetch_url as _fetch_url, read_scratch as _read_scratch
 from utils import truncate
 
+import console as ui
+from input import read_input, setup_readline
+from vault import (
+    bootstrap as _vault_bootstrap,
+    run_action as _vault_run,
+    redact as _vault_redact,
+    save as _vault_save,
+)
+
 # ------------------------------------------------------------------------------
 # Configuration
 # ------------------------------------------------------------------------------
@@ -36,6 +45,12 @@ BASE_URL = "http://127.0.0.1:8080/v1"
 LLM_MODEL = "local-model"
 SQLITE_DB_PATH = "./agent_checkpoints.db"
 CHROMA_PERSIST_DIR = "./agent_memory_chroma"
+
+# ------------------------------------------------------------------------------
+# 0. Credential Vault — load stored secrets into the environment before the LLM
+#    and tools are constructed, so *_API_KEY values are available to them.
+# ------------------------------------------------------------------------------
+_VAULT_ENV_LOADED = _vault_bootstrap()
 
 # ------------------------------------------------------------------------------
 # 1. LLM & Embeddings
@@ -154,10 +169,24 @@ def read_scratch(scratch_id: str, offset: int = 0, length: int = 1500) -> str:
     """Read a portion of a saved scratch file."""
     return _read_scratch(scratch_id=scratch_id, offset=offset, length=length)
 
+@tool
+def vault(action: str, name: str = "", value: str = "") -> str:
+    """Manage encrypted credentials stored in the local vault.
+
+    Actions:
+      - 'store':  encrypt and save a credential (needs name + value)
+      - 'get':    retrieve a credential value (needs name)
+      - 'list':   list stored credential names (no values)
+      - 'remove': delete a credential (needs name)
+      - 'status': show vault health
+    Stored credentials are also exported as environment variables.
+    """
+    return _vault_run(action, name=name, value=value)
+
 tools = [
     execute_shell_command, read_any_file, write_any_file,
     search_web, fetch_url, read_scratch,
-    remember, recall,
+    remember, recall, vault,
 ]
 llm_with_tools = llm.bind_tools(tools)
 
@@ -240,9 +269,22 @@ Do not include explanations, markdown, or extra text.
 # ------------------------------------------------------------------------------
 # 7. Build Graph with Distillation
 # ------------------------------------------------------------------------------
+_tool_node = ToolNode(tools)
+
+def tools_node(state: MessagesState):
+    """Run tools, then scrub any stored credential values from their output
+    before it re-enters the model's context (see vault.redact)."""
+    result = _tool_node.invoke(state)
+    for msg in result.get("messages", []):
+        # Skip the vault tool itself — 'get' is meant to return the value.
+        if getattr(msg, "type", None) == "tool" and getattr(msg, "name", None) != "vault" \
+                and isinstance(getattr(msg, "content", None), str):
+            msg.content = _vault_redact(msg.content)
+    return result
+
 builder = StateGraph(MessagesState)
 builder.add_node("agent", agent)
-builder.add_node("tools", ToolNode(tools))
+builder.add_node("tools", tools_node)
 builder.add_node("distill", distill_knowledge)
 
 builder.add_edge(START, "agent")
@@ -271,9 +313,9 @@ def run_repl(app, config):
     """
     while True:
         try:
-            user_input = input("\nYou: ")
+            user_input = read_input("\nYou: ")
         except (KeyboardInterrupt, EOFError):
-            print("\nSession closing...")
+            ui.info("Session closing...")
             break
 
         if user_input.lower() in ['quit', 'exit']:
@@ -290,29 +332,37 @@ def run_repl(app, config):
             for event in events:
                 latest_msg = event["messages"][-1]
                 if latest_msg.type == "ai" and latest_msg.content:
-                    print(f"\nAgent: {latest_msg.content}")
+                    ui.agent_response(_vault_redact(latest_msg.content))
                 elif latest_msg.type == "tool":
-                    print(f"\n[System: Executed '{latest_msg.name}' -> {len(latest_msg.content)} chars]")
+                    ui.tool_result(latest_msg.name or "tool",
+                                   f"{len(latest_msg.content)} chars returned")
         except (KeyboardInterrupt, EOFError):
-            print("\nSession closing...")
+            ui.info("Session closing...")
             break
         except Exception as e:
             # Don't kill the session over a single failed turn.
             logger.exception("Error while processing turn")
-            print(f"\n[Error: {e}]\nThe session is still active — try again or type 'quit' to exit.")
+            ui.error(f"{e}")
+            ui.info("The session is still active — try again or type 'quit' to exit.")
 
 
 if __name__ == "__main__":
-    print("===================================================================")
-    print(" ⚠️ WARNING: THIS AGENT HAS UNRESTRICTED SHELL/FILE/WEB ACCESS ⚠️ ")
-    print("===================================================================")
+    setup_readline()
+    ui.banner("langbot", "unrestricted shell / file / web agent")
+    ui.warning("This agent has UNRESTRICTED shell, file, and web access.")
+    if _VAULT_ENV_LOADED:
+        ui.info(f"Vault: loaded {len(_VAULT_ENV_LOADED)} credential(s) into the environment.")
+    ui.startup_tip(LLM_MODEL)
     config = {"configurable": {"thread_id": "root_access_session_1"}}
 
-    if SQLITE_AVAILABLE:
-        with SqliteSaver.from_conn_string(SQLITE_DB_PATH) as checkpointer:
+    try:
+        if SQLITE_AVAILABLE:
+            with SqliteSaver.from_conn_string(SQLITE_DB_PATH) as checkpointer:
+                app = builder.compile(checkpointer=checkpointer)
+                run_repl(app, config)
+        else:
+            checkpointer = MemorySaver()
             app = builder.compile(checkpointer=checkpointer)
             run_repl(app, config)
-    else:
-        checkpointer = MemorySaver()
-        app = builder.compile(checkpointer=checkpointer)
-        run_repl(app, config)
+    finally:
+        _vault_save()

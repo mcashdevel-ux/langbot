@@ -540,24 +540,31 @@ class RedactionFilter:
     def __init__(self, vault_store: VaultStore):
         self._vault = vault_store
         self._patterns: Dict[str, str] = {}  # credential name → mask pattern
+        # Cache of name → plaintext, populated on refresh so that redact() does
+        # not have to decrypt every credential (PBKDF2, 100k iters each) on
+        # every call. Refreshed whenever credentials change.
+        self._values: Dict[str, str] = {}
 
     def refresh_patterns(self):
-        """Rebuild redaction patterns from current credential values."""
+        """Rebuild redaction patterns/value cache from current credentials."""
         self._patterns = {}
-        values = self._vault.get_all_plaintext()
-        for name, value in values.items():
+        self._values = self._vault.get_all_plaintext()
+        for name, value in self._values.items():
             if value and len(value) >= 4:
-                # Create a pattern for the full value (redact in outputs)
                 # Use first 4 chars + "..." for display
                 display = value[:4] + "..." if len(value) > 8 else "****"
                 self._patterns[name] = display
 
     def redact(self, text: str) -> str:
-        """Redact known credential values from a text string."""
-        if not self._patterns:
+        """Redact known credential values from a text string.
+
+        Longer values are replaced first so a short credential that is a
+        substring of a longer one doesn't partially mask it.
+        """
+        if not self._values or not text:
             return text
-        values = self._vault.get_all_plaintext()
-        for name, value in values.items():
+        for name, value in sorted(self._values.items(),
+                                  key=lambda kv: len(kv[1] or ""), reverse=True):
             if value and len(value) >= 4 and value in text:
                 text = text.replace(value, f"🔑[{name}_REDACTED]")
         return text
@@ -580,6 +587,67 @@ _store: Optional[VaultStore] = None
 _redactor: Optional[RedactionFilter] = None
 _agent_ref: Any = None
 _ENV_LOADED: List[str] = []  # Track which env vars were auto-loaded from vault
+
+
+def bootstrap() -> List[str]:
+    """Framework-agnostic init used by the LangGraph agent (langbot.py).
+
+    Creates the store + redactor, auto-initializes the vault on first run,
+    loads stored credentials into ``os.environ`` (without overriding values the
+    user already set), primes the redaction cache, and returns the list of env
+    var names that were auto-loaded.
+    """
+    global _store, _redactor, _ENV_LOADED
+
+    if _store is None:
+        _store = VaultStore()
+    if _redactor is None:
+        _redactor = RedactionFilter(_store)
+
+    if _store.is_locked() and not MASTERKEY_FILE.exists():
+        _store.init_vault()
+        logger.info("Vault auto-initialized (no existing vault found)")
+
+    if _store.is_locked():
+        logger.info("Vault is locked, skipping env auto-load")
+        return []
+
+    _redactor.refresh_patterns()
+
+    loaded = []
+    for name, value in _store.get_all_plaintext().items():
+        if name not in os.environ:
+            os.environ[name] = value
+            loaded.append(name)
+
+    _ENV_LOADED = loaded
+    if loaded:
+        logger.info(f"Auto-loaded {len(loaded)} credentials from vault into env vars")
+    return loaded
+
+
+def run_action(action: str, name: str = "", value: str = "") -> str:
+    """Public entry point for the vault tool (see ``_vault_handler``)."""
+    return _vault_handler(action, name=name, value=value)
+
+
+def redact(text: str) -> str:
+    """Redact any known credential values from ``text``.
+
+    Safe to call before the vault is initialized (returns ``text`` unchanged).
+    This is what makes the auto-redaction feature actually take effect: callers
+    must use the returned string.
+    """
+    if _redactor is None or not isinstance(text, str):
+        return text
+    return _redactor.redact(text)
+
+
+def save() -> None:
+    """Persist vault state (call on shutdown)."""
+    if _store is not None:
+        _store._save_credentials()
+        _store._save_metadata()
 
 
 def register(agent):
@@ -669,17 +737,32 @@ def stop(agent):
 # Output Redactor Observer
 # ---------------------------------------------------------------------------
 
-def _output_redactor(tool_name: str, args: Dict, result: str):
+# Tool names whose output must not be redacted (they legitimately return
+# credential values). Includes the current LangGraph tool name ("vault") and
+# the historical per-action names.
+_CREDENTIAL_TOOL_NAMES = frozenset({
+    "vault",
+    "store_credential", "get_credential", "list_credentials",
+    "remove_credential", "vault_status",
+})
+
+
+def _output_redactor(tool_name: str, args: Dict, result: str) -> str:
     """Redact known credential values from tool results.
-    Runs after every tool execution via agent._tool_observers."""
+
+    Runs after every tool execution via agent._tool_observers. Returns the
+    (possibly redacted) result so the caller can substitute it — a no-return
+    observer would leave the original, unredacted text in place.
+    """
     global _redactor
     if not _redactor:
-        return
-    # Credential management tools don't need redaction
-    if tool_name in ("store_credential", "get_credential", "list_credentials",
-                      "remove_credential", "vault_status"):
-        return
+        return result
+    # Credential-management tools intentionally return values (e.g. get) and
+    # don't need their output scrubbed.
+    if tool_name in _CREDENTIAL_TOOL_NAMES:
+        return result
     _redactor.refresh_patterns()
+    return _redactor.redact(result)
 
 
 # ---------------------------------------------------------------------------
