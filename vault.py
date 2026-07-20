@@ -169,6 +169,22 @@ def generate_master_key() -> bytes:
     return os.urandom(KEY_SIZE)
 
 
+def _restrict_dir_permissions(path: Path) -> None:
+    """Best-effort restrict a directory to owner-only access (0700)."""
+    try:
+        os.chmod(path, 0o700)
+    except OSError as e:
+        logger.warning(f"Could not restrict permissions on {path}: {e}")
+
+
+def _restrict_file_permissions(path: str) -> None:
+    """Best-effort restrict a file to owner read/write only (0600)."""
+    try:
+        os.chmod(path, 0o600)
+    except OSError as e:
+        logger.warning(f"Could not restrict permissions on {path}: {e}")
+
+
 # ---------------------------------------------------------------------------
 # Vault Store — persistence layer
 # ---------------------------------------------------------------------------
@@ -193,6 +209,7 @@ class VaultStore:
                 return "Vault already initialized. Use vault_status() to check."
 
             VAULT_DIR.mkdir(parents=True, exist_ok=True)
+            _restrict_dir_permissions(VAULT_DIR)
             self._master_key = generate_master_key()
 
             if password:
@@ -217,6 +234,7 @@ class VaultStore:
                 }
 
             atomic_write_json(MASTERKEY_FILE, key_data)
+            _restrict_file_permissions(str(MASTERKEY_FILE))
 
             self._save_credentials()
             self._save_metadata()
@@ -387,22 +405,26 @@ class VaultStore:
     def _save_credentials(self):
         """Save encrypted credentials blob."""
         try:
+            _restrict_dir_permissions(VAULT_DIR)
             atomic_write_json(CREDENTIALS_FILE, {
                 "version": 1,
                 "updated_at": time.time(),
                 "credentials": self._credentials,
             })
+            _restrict_file_permissions(str(CREDENTIALS_FILE))
         except Exception as e:
             logger.warning(f"Failed to save credentials: {e}")
 
     def _save_metadata(self):
         """Save credential metadata (names, timestamps, no values)."""
         try:
+            _restrict_dir_permissions(VAULT_DIR)
             atomic_write_json(METADATA_FILE, {
                 "version": 1,
                 "updated_at": time.time(),
                 "credentials": list(self._metadata.values()),
             })
+            _restrict_file_permissions(str(METADATA_FILE))
         except Exception as e:
             logger.warning(f"Failed to save metadata: {e}")
 
