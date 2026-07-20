@@ -316,7 +316,10 @@ def search_engine(
     )
     
     # Step 1: Build request
-    engine.request(query, params)
+    try:
+        engine.request(query, params)
+    except Exception as e:
+        raise RuntimeError(f"Engine '{engine_name}' failed to build request: {e}") from e
     
     if not params.get("url"):
         # Engine declined the query (e.g. query too long for DDG)
@@ -343,8 +346,14 @@ def search_engine(
     try:
         results = engine.response(wrapped)
     except Exception as e:
-        # Some engines (e.g. wikipedia) may return errors for certain queries
-        logger.debug(f"Engine '{engine_name}' response parsing failed: {e}")
+        # Some engines (e.g. wikipedia) may return errors for certain queries.
+        # We degrade to an empty result set rather than crashing the caller, but
+        # log at warning level so a parsing failure isn't indistinguishable from
+        # a genuinely empty search.
+        logger.warning(
+            "Engine '%s' response parsing failed (HTTP %s): %s",
+            engine_name, getattr(resp, "status_code", "?"), e,
+        )
         results = []
     
     # Step 5: Extract results

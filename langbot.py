@@ -1,8 +1,11 @@
 import os
 import subprocess
 import json
+import logging
 import uuid
-from pathlib import Path
+from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -61,7 +64,7 @@ def _store_memory(text: str) -> str:
     memory_collection.add(
         ids=[mem_id],
         embeddings=[vector],
-        metadatas=[{"text": text, "timestamp": subprocess.getoutput("date -u +%Y-%m-%dT%H:%M:%SZ")}],
+        metadatas=[{"text": text, "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}],
     )
     return mem_id
 
@@ -228,8 +231,12 @@ Do not include explanations, markdown, or extra text.
         for fact in facts:
             _store_memory(fact)
             # Optional console feedback – quiet by default
-    except Exception:
-        pass  # Distillation is a bonus, never break the main loop
+    except json.JSONDecodeError as e:
+        # Model returned something that wasn't a JSON array; distillation is a
+        # bonus, so we don't break the main loop — but we don't hide it either.
+        logger.warning("Knowledge distillation skipped: could not parse model output as JSON: %s", e)
+    except Exception as e:
+        logger.warning("Knowledge distillation failed: %s", e, exc_info=True)
 
     return state
 
@@ -257,6 +264,47 @@ builder.add_edge("distill", END)
 # ------------------------------------------------------------------------------
 # 8. Execution Loop
 # ------------------------------------------------------------------------------
+def run_repl(app, config):
+    """Interactive read-eval-print loop.
+
+    A failure while handling one turn (LLM error, tool crash, bad checkpoint
+    state, etc.) must not tear down the whole session — it is caught, surfaced
+    to the user, and the loop continues to the next prompt. Only KeyboardInterrupt
+    and EOFError intentionally end the session.
+    """
+    while True:
+        try:
+            user_input = input("\nYou: ")
+        except (KeyboardInterrupt, EOFError):
+            print("\nSession closing...")
+            break
+
+        if user_input.lower() in ['quit', 'exit']:
+            break
+        if not user_input.strip():
+            continue
+
+        try:
+            events = app.stream(
+                {"messages": [HumanMessage(content=user_input)]},
+                config=config,
+                stream_mode="values"
+            )
+            for event in events:
+                latest_msg = event["messages"][-1]
+                if latest_msg.type == "ai" and latest_msg.content:
+                    print(f"\nAgent: {latest_msg.content}")
+                elif latest_msg.type == "tool":
+                    print(f"\n[System: Executed '{latest_msg.name}' -> {len(latest_msg.content)} chars]")
+        except (KeyboardInterrupt, EOFError):
+            print("\nSession closing...")
+            break
+        except Exception as e:
+            # Don't kill the session over a single failed turn.
+            logger.exception("Error while processing turn")
+            print(f"\n[Error: {e}]\nThe session is still active — try again or type 'quit' to exit.")
+
+
 if __name__ == "__main__":
     print("===================================================================")
     print(" ⚠️ WARNING: THIS AGENT HAS UNRESTRICTED SHELL/FILE/WEB ACCESS ⚠️ ")
@@ -266,48 +314,8 @@ if __name__ == "__main__":
     if SQLITE_AVAILABLE:
         with SqliteSaver.from_conn_string(SQLITE_DB_PATH) as checkpointer:
             app = builder.compile(checkpointer=checkpointer)
-            while True:
-                try:
-                    user_input = input("\nYou: ")
-                    if user_input.lower() in ['quit', 'exit']:
-                        break
-                    if not user_input.strip():
-                        continue
-                    events = app.stream(
-                        {"messages": [HumanMessage(content=user_input)]},
-                        config=config,
-                        stream_mode="values"
-                    )
-                    for event in events:
-                        latest_msg = event["messages"][-1]
-                        if latest_msg.type == "ai" and latest_msg.content:
-                            print(f"\nAgent: {latest_msg.content}")
-                        elif latest_msg.type == "tool":
-                            print(f"\n[System: Executed '{latest_msg.name}' -> {len(latest_msg.content)} chars]")
-                except (KeyboardInterrupt, EOFError):
-                    print("\nSession closing...")
-                    break
+            run_repl(app, config)
     else:
         checkpointer = MemorySaver()
         app = builder.compile(checkpointer=checkpointer)
-        while True:
-            try:
-                user_input = input("\nYou: ")
-                if user_input.lower() in ['quit', 'exit']:
-                    break
-                if not user_input.strip():
-                    continue
-                events = app.stream(
-                    {"messages": [HumanMessage(content=user_input)]},
-                    config=config,
-                    stream_mode="values"
-                )
-                for event in events:
-                    latest_msg = event["messages"][-1]
-                    if latest_msg.type == "ai" and latest_msg.content:
-                        print(f"\nAgent: {latest_msg.content}")
-                    elif latest_msg.type == "tool":
-                        print(f"\n[System: Executed '{latest_msg.name}' -> {len(latest_msg.content)} chars]")
-            except (KeyboardInterrupt, EOFError):
-                print("\nSession closing...")
-                break
+        run_repl(app, config)

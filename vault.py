@@ -239,23 +239,34 @@ class VaultStore:
                 return False
 
             ktype = key_data.get("type", "raw")
-            if ktype == "raw":
-                key_b64 = key_data.get("key", "")
-                self._master_key = base64.urlsafe_b64decode(key_b64.encode('ascii'))
-            elif ktype == "password_wrapped":
-                if not password:
-                    logger.warning("Password required to unlock vault")
+            try:
+                if ktype == "raw":
+                    key_b64 = key_data.get("key", "")
+                    if not key_b64:
+                        logger.warning("Master key file is missing the 'key' field")
+                        return False
+                    self._master_key = base64.urlsafe_b64decode(key_b64.encode('ascii'))
+                elif ktype == "password_wrapped":
+                    if not password:
+                        logger.warning("Password required to unlock vault")
+                        return False
+                    salt = base64.urlsafe_b64decode(key_data["salt"].encode('ascii'))
+                    pwd_key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'),
+                                                   salt, PBKDF2_ITERATIONS, dklen=KEY_SIZE)
+                    hex_key = decrypt_value(pwd_key, key_data["wrapped_key"])
+                    if hex_key is None:
+                        logger.warning("Wrong password")
+                        return False
+                    self._master_key = bytes.fromhex(hex_key)
+                else:
+                    logger.warning(f"Unknown key type: {ktype}")
                     return False
-                salt = base64.urlsafe_b64decode(key_data["salt"].encode('ascii'))
-                pwd_key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'),
-                                               salt, PBKDF2_ITERATIONS, dklen=KEY_SIZE)
-                hex_key = decrypt_value(pwd_key, key_data["wrapped_key"])
-                if hex_key is None:
-                    logger.warning("Wrong password")
-                    return False
-                self._master_key = bytes.fromhex(hex_key)
-            else:
-                logger.warning(f"Unknown key type: {ktype}")
+            except (KeyError, ValueError, TypeError) as e:
+                # Corrupt/malformed master key file — surface it as a failed
+                # unlock instead of letting it crash VaultStore construction
+                # (which happens via _load() on __init__).
+                logger.warning(f"Failed to load master key (corrupt vault file?): {e}")
+                self._master_key = None
                 return False
 
             self._load_credentials()
