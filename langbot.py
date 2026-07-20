@@ -26,6 +26,7 @@ import chromadb
 from chromadb.config import Settings
 
 from web_tools import search_web as _search_web, fetch_url as _fetch_url, read_scratch as _read_scratch
+from utils import truncate
 
 # ------------------------------------------------------------------------------
 # Configuration
@@ -109,9 +110,7 @@ def execute_shell_command(command: str) -> str:
         output = result.stdout
         if result.stderr:
             output += f"\n[STDERR]:\n{result.stderr}"
-        if len(output) > 20000:
-            return output[:20000] + "\n...[truncated]"
-        return output or f"Command '{command}' executed successfully."
+        return truncate(output) or f"Command '{command}' executed successfully."
     except subprocess.TimeoutExpired:
         return f"Timeout: '{command}'"
     except Exception as e:
@@ -124,10 +123,7 @@ def read_any_file(file_path: str) -> str:
         return f"Error: Path '{file_path}' does not exist."
     try:
         with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-            if len(content) > 20000:
-                return content[:20000] + "\n...[truncated]"
-            return content
+            return truncate(f.read())
     except Exception as e:
         return f"Failed to read {file_path}: {e}"
 
