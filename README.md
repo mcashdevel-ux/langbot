@@ -16,19 +16,20 @@ long-term memory (Chroma + sentence-transformers).
   from each exchange into long-term memory.
 - **Long-term memory** — Chroma vector store (`agent_memory_chroma/`) with
   `remember` / `recall` tools plus automatic distillation.
-- **Web tools** (`web_tools.py`) — `search_web` and `fetch_url` (via Jina Reader) that
-  save full payloads to an on-disk scratchpad and return short, context-cheap previews;
+- **Web tools** (`components/web_tools.py`) — `search_web` and `fetch_url` (via Jina Reader)
+  that save full payloads to an on-disk scratchpad and return short, context-cheap previews;
   `read_scratch` pages through the rest.
-- **SearXNG engine adapter** (`engines.py`) — runs individual SearXNG engine modules
-  directly (no SearXNG web app), supporting many search engines.
+- **SearXNG engine adapter** (`components/engines.py`) — runs individual SearXNG engine
+  modules directly (no SearXNG web app), supporting many search engines.
 - **Conversation persistence** — LangGraph SQLite checkpointer when
   `langgraph-checkpoint-sqlite` is installed, else in-memory.
-- **Encrypted credential vault** (`vault.py`) — AES-256-GCM encrypted secrets store,
-  exposed as the `vault` tool (`store`/`get`/`list`/`remove`/`status`). Stored
+- **Encrypted credential vault** (`components/vault.py`) — AES-256-GCM encrypted secrets
+  store, exposed as the `vault` tool (`store`/`get`/`list`/`remove`/`status`). Stored
   credentials are auto-loaded into the environment at startup, and their values are
   automatically **redacted** from other tools' output before it re-enters the model.
-- **Terminal UX** — `input.py` (readline history, multi-line paste detection, Esc-to-cancel)
-  and `console.py` (colored output, banners, spinners) power the interactive REPL.
+- **Terminal UX** — `components/input.py` (readline history, multi-line paste detection,
+  Esc-to-cancel) and `components/console.py` (colored output, banners, spinners) power the
+  interactive REPL.
 
 ## Requirements
 
@@ -37,7 +38,8 @@ long-term memory (Chroma + sentence-transformers).
 
 ### Python dependencies
 
-There is no dependency manifest yet. Install the packages the code imports:
+There is no runtime dependency manifest yet (dev/test deps are in `requirements-dev.txt`).
+Install the packages the code imports:
 
 ```bash
 pip install \
@@ -47,7 +49,7 @@ pip install \
   cryptography requests httpx colorama rich
 ```
 
-`engines.py` additionally needs the SearXNG source on disk. Place it at one of
+`components/engines.py` additionally needs the SearXNG source on disk. Place it at one of
 `./searxng-src`, `~/searxng-src`, or `/usr/local/searxng/searxng-src`, or let the module
 clone it automatically on first use:
 
@@ -91,6 +93,16 @@ You: search the web for the latest langgraph release and summarize it
 
 Type `quit` or `exit` (or Ctrl+C / Ctrl+D) to leave. Conversation state persists across
 runs via the SQLite checkpointer.
+
+### Tests
+
+The `components/` modules have a unit-test suite (the heavy LLM deps and a live LLM server
+are not required):
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
 
 ### Available tools
 
