@@ -5,17 +5,17 @@ Secure encrypted storage for API keys and credentials.
 Replaces plaintext .env and config.json API key fields.
 
 Architecture:
-  VaultStore       — encrypted storage backend (pure Python, zero deps)
+  VaultStore       — encrypted storage backend
   CredentialVault  — manages the vault lifecycle (init, lock, unlock)
   RedactionFilter  — auto-redacts known credential values from tool outputs
   Tool Interface   — vault(action, name, value)
 
 Security Design:
   - Key derivation: PBKDF2-HMAC-SHA256 (100k iterations, per-salt)
-  - Encryption: SHA256-CTR mode (stream cipher using SHA256 as PRF)
-  - Integrity: HMAC-SHA256 (encrypt-then-mac)
-  - Master key: 32-byte random, stored in memory/vault/.masterkey
-  - Zero dependencies: uses only hashlib, hmac, os.urandom, base64
+  - Encryption: AES-256-GCM (authenticated encryption via `cryptography`)
+  - Master key: 32-byte random, stored in memory/vault/.masterkey (0600)
+  - Optional password wrapping via the LANGBOT_VAULT_PASSWORD env var
+  - Legacy SHA256-CTR blobs are still readable and auto-migrated on unlock
 
 Tools Registered:
   vault(action="store")    — encrypt and store a credential
@@ -36,6 +36,9 @@ import threading
 from pathlib import Path
 from typing import Dict, Optional, List, Any, Tuple
 
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
 from utils import atomic_write_json
 
 logger = logging.getLogger(__name__)
@@ -50,9 +53,16 @@ CREDENTIALS_FILE = VAULT_DIR / "credentials.json"
 METADATA_FILE = VAULT_DIR / "metadata.json"
 PBKDF2_ITERATIONS = 100000
 KEY_SIZE = 32  # 256-bit
-NONCE_SIZE = 16
+NONCE_SIZE = 16          # salt length (also legacy CTR nonce length)
+GCM_NONCE_SIZE = 12      # AES-GCM nonce length
+GCM_TAG_SIZE = 16        # AES-GCM authentication tag length
+V2_PREFIX = "v2:"        # marks AES-GCM blobs; legacy blobs have no prefix
 CREDENTIAL_MAX_VALUE_LEN = 10000
 MAX_CREDENTIALS = 100
+
+# Optional env var: if set, the master key is wrapped with a password-derived
+# key instead of being stored in recoverable form on disk.
+VAULT_PASSWORD_ENV = "LANGBOT_VAULT_PASSWORD"
 
 # Tool Definitions
 TOOL_DEFINITIONS = [
@@ -86,13 +96,12 @@ TOOL_DEFINITIONS = [
 
 
 # ---------------------------------------------------------------------------
-# Pure-Python Encryption Utilities
+# Encryption Utilities (AES-256-GCM, with legacy SHA256-CTR read support)
 # ---------------------------------------------------------------------------
 
-def _derive_keys(master_key: bytes, salt: bytes) -> Tuple[bytes, bytes]:
-    """Derive encryption key and MAC key from master key using PBKDF2."""
-    dk = hashlib.pbkdf2_hmac('sha256', master_key, salt, PBKDF2_ITERATIONS, dklen=KEY_SIZE * 2)
-    return dk[:KEY_SIZE], dk[KEY_SIZE:]
+def _derive_enc_key(master_key: bytes, salt: bytes) -> bytes:
+    """Derive a 256-bit AES key from the master key using PBKDF2-HMAC-SHA256."""
+    return hashlib.pbkdf2_hmac('sha256', master_key, salt, PBKDF2_ITERATIONS, dklen=KEY_SIZE)
 
 
 def _derive_password_key(password: str, salt: bytes) -> bytes:
@@ -101,44 +110,74 @@ def _derive_password_key(password: str, salt: bytes) -> bytes:
                                salt, PBKDF2_ITERATIONS, dklen=KEY_SIZE)
 
 
-def _sha256_ctr_encrypt(enc_key: bytes, nonce: bytes, plaintext: bytes) -> bytes:
-    """Encrypt using SHA256 in CTR mode (SHA256 as PRF)."""
-    # Generate keystream: SHA256(enc_key || nonce || counter) for each 32-byte block
-    keystream = b""
-    counter = 0
-    while len(keystream) < len(plaintext):
-        counter_bytes = counter.to_bytes(4, 'big')
-        block = hashlib.sha256(enc_key + nonce + counter_bytes).digest()
-        keystream += block
-        counter += 1
-    # XOR plaintext with keystream
-    return bytes(p ^ k for p, k in zip(plaintext, keystream[:len(plaintext)]))
-
-
-def _sha256_ctr_decrypt(enc_key: bytes, nonce: bytes, ciphertext: bytes) -> bytes:
-    """Decrypt using SHA256-CTR (same as encrypt, XOR is symmetric)."""
-    return _sha256_ctr_encrypt(enc_key, nonce, ciphertext)
-
-
 def encrypt_value(master_key: bytes, plaintext: str) -> str:
-    """Encrypt a string value. Returns URL-safe base64 encoded blob."""
+    """Encrypt a string value with AES-256-GCM (authenticated encryption).
+
+    Returns a ``v2:``-prefixed URL-safe base64 blob of ``salt || nonce || ct``,
+    where ``ct`` includes the GCM authentication tag.
+    """
     salt = os.urandom(NONCE_SIZE)
-    nonce = os.urandom(NONCE_SIZE)
-    enc_key, mac_key = _derive_keys(master_key, salt)
+    nonce = os.urandom(GCM_NONCE_SIZE)
+    key = _derive_enc_key(master_key, salt)
 
-    data = plaintext.encode('utf-8')
-    ciphertext = _sha256_ctr_encrypt(enc_key, nonce, data)
+    ciphertext = AESGCM(key).encrypt(nonce, plaintext.encode('utf-8'), None)
 
-    # Encrypt-then-MAC: tag over nonce || ciphertext
-    tag = hmac.new(mac_key, nonce + ciphertext, hashlib.sha256).digest()
-
-    # Pack: salt || nonce || ciphertext || tag
-    payload = salt + nonce + ciphertext + tag
-    return base64.urlsafe_b64encode(payload).decode('ascii')
+    payload = salt + nonce + ciphertext
+    return V2_PREFIX + base64.urlsafe_b64encode(payload).decode('ascii')
 
 
 def decrypt_value(master_key: bytes, blob: str) -> Optional[str]:
-    """Decrypt a base64 blob. Returns None on integrity failure."""
+    """Decrypt a credential blob. Returns None on integrity failure.
+
+    Transparently handles both the current AES-GCM format (``v2:`` prefix) and
+    the legacy SHA256-CTR format written by older versions of the vault.
+    """
+    if blob.startswith(V2_PREFIX):
+        return _decrypt_gcm(master_key, blob[len(V2_PREFIX):])
+    return _decrypt_legacy(master_key, blob)
+
+
+def _decrypt_gcm(master_key: bytes, b64: str) -> Optional[str]:
+    """Decrypt an AES-256-GCM blob (without the ``v2:`` prefix)."""
+    try:
+        payload = base64.urlsafe_b64decode(b64.encode('ascii'))
+        if len(payload) < NONCE_SIZE + GCM_NONCE_SIZE + GCM_TAG_SIZE:
+            return None
+
+        salt = payload[:NONCE_SIZE]
+        nonce = payload[NONCE_SIZE:NONCE_SIZE + GCM_NONCE_SIZE]
+        ciphertext = payload[NONCE_SIZE + GCM_NONCE_SIZE:]
+
+        key = _derive_enc_key(master_key, salt)
+        plaintext = AESGCM(key).decrypt(nonce, ciphertext, None)
+        return plaintext.decode('utf-8')
+    except InvalidTag:
+        logger.warning("Vault: integrity check failed (tampered or wrong key)")
+        return None
+    except Exception as e:
+        logger.warning(f"Vault decrypt error: {e}")
+        return None
+
+
+def _derive_legacy_keys(master_key: bytes, salt: bytes) -> Tuple[bytes, bytes]:
+    """Derive encryption and MAC keys for legacy SHA256-CTR blobs."""
+    dk = hashlib.pbkdf2_hmac('sha256', master_key, salt, PBKDF2_ITERATIONS, dklen=KEY_SIZE * 2)
+    return dk[:KEY_SIZE], dk[KEY_SIZE:]
+
+
+def _sha256_ctr_crypt(enc_key: bytes, nonce: bytes, data: bytes) -> bytes:
+    """Legacy SHA256-CTR keystream XOR (symmetric: encrypt == decrypt)."""
+    keystream = b""
+    counter = 0
+    while len(keystream) < len(data):
+        block = hashlib.sha256(enc_key + nonce + counter.to_bytes(4, 'big')).digest()
+        keystream += block
+        counter += 1
+    return bytes(p ^ k for p, k in zip(data, keystream[:len(data)]))
+
+
+def _decrypt_legacy(master_key: bytes, blob: str) -> Optional[str]:
+    """Decrypt a legacy SHA256-CTR + HMAC blob for backward compatibility."""
     try:
         payload = base64.urlsafe_b64decode(blob.encode('ascii'))
         if len(payload) < NONCE_SIZE * 2 + KEY_SIZE:
@@ -149,15 +188,14 @@ def decrypt_value(master_key: bytes, blob: str) -> Optional[str]:
         tag = payload[-KEY_SIZE:]
         ciphertext = payload[NONCE_SIZE * 2:-KEY_SIZE]
 
-        enc_key, mac_key = _derive_keys(master_key, salt)
+        enc_key, mac_key = _derive_legacy_keys(master_key, salt)
 
-        # Verify MAC
         expected_tag = hmac.new(mac_key, nonce + ciphertext, hashlib.sha256).digest()
         if not hmac.compare_digest(tag, expected_tag):
             logger.warning("Vault: integrity check failed (tampered or wrong key)")
             return None
 
-        plaintext = _sha256_ctr_decrypt(enc_key, nonce, ciphertext)
+        plaintext = _sha256_ctr_crypt(enc_key, nonce, ciphertext)
         return plaintext.decode('utf-8')
     except Exception as e:
         logger.warning(f"Vault decrypt error: {e}")
@@ -203,7 +241,13 @@ class VaultStore:
     # ── Initialization ──
 
     def init_vault(self, password: Optional[str] = None) -> str:
-        """Initialize the vault. Generates master key if needed."""
+        """Initialize the vault. Generates master key if needed.
+
+        If ``password`` is not supplied it falls back to the
+        ``LANGBOT_VAULT_PASSWORD`` env var; when a password is available the
+        master key is wrapped with it rather than stored recoverably on disk.
+        """
+        password = password or os.environ.get(VAULT_PASSWORD_ENV) or None
         with self._lock:
             if MASTERKEY_FILE.exists():
                 return "Vault already initialized. Use vault_status() to check."
@@ -246,6 +290,7 @@ class VaultStore:
 
     def unlock(self, password: Optional[str] = None) -> bool:
         """Unlock the vault by loading the master key."""
+        password = password or os.environ.get(VAULT_PASSWORD_ENV) or None
         with self._lock:
             if not MASTERKEY_FILE.exists():
                 logger.warning("Vault not initialized")
@@ -461,7 +506,28 @@ class VaultStore:
     def _load(self):
         """Auto-load vault state on instantiation."""
         if MASTERKEY_FILE.exists():
-            self.unlock()
+            if self.unlock():
+                self._migrate_legacy_blobs()
+
+    def _migrate_legacy_blobs(self):
+        """Re-encrypt any legacy SHA256-CTR credentials to AES-GCM.
+
+        Runs once after unlock so existing vaults are transparently upgraded to
+        the vetted cipher without user action. Called without the store lock
+        held (``_save_credentials`` acquires it).
+        """
+        if self.is_locked():
+            return
+        changed = False
+        for name, blob in list(self._credentials.items()):
+            if not blob.startswith(V2_PREFIX):
+                plaintext = decrypt_value(self._master_key, blob)
+                if plaintext is not None:
+                    self._credentials[name] = encrypt_value(self._master_key, plaintext)
+                    changed = True
+        if changed:
+            self._save_credentials()
+            logger.info("Vault: migrated legacy credentials to AES-GCM")
 
 
 # ---------------------------------------------------------------------------
@@ -746,7 +812,7 @@ def _vault_status() -> str:
         for name in sorted(_ENV_LOADED):
             lines.append(f"    • ${name}")
 
-    lines.append(f"\n  Encryption: SHA256-CTR + HMAC-SHA256")
+    lines.append(f"\n  Encryption: AES-256-GCM")
     lines.append(f"  Key derivation: PBKDF2-HMAC-SHA256 ({PBKDF2_ITERATIONS} iterations)")
     lines.append(f"  Storage: {CREDENTIALS_FILE}")
     lines.append(f"\n  Commands:")
