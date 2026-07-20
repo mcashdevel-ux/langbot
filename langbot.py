@@ -1,9 +1,12 @@
 import os
 import subprocess
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -225,8 +228,12 @@ Do not include explanations, markdown, or extra text.
         for fact in facts:
             _store_memory(fact)
             # Optional console feedback – quiet by default
-    except Exception:
-        pass  # Distillation is a bonus, never break the main loop
+    except json.JSONDecodeError as e:
+        # Model returned something that wasn't a JSON array; distillation is a
+        # bonus, so we don't break the main loop — but we don't hide it either.
+        logger.warning("Knowledge distillation skipped: could not parse model output as JSON: %s", e)
+    except Exception as e:
+        logger.warning("Knowledge distillation failed: %s", e, exc_info=True)
 
     return state
 
@@ -255,14 +262,26 @@ builder.add_edge("distill", END)
 # 8. Execution Loop
 # ------------------------------------------------------------------------------
 def run_repl(app, config):
-    """Interactive read-eval-print loop for a compiled agent app."""
+    """Interactive read-eval-print loop.
+
+    A failure while handling one turn (LLM error, tool crash, bad checkpoint
+    state, etc.) must not tear down the whole session — it is caught, surfaced
+    to the user, and the loop continues to the next prompt. Only KeyboardInterrupt
+    and EOFError intentionally end the session.
+    """
     while True:
         try:
             user_input = input("\nYou: ")
-            if user_input.lower() in ['quit', 'exit']:
-                break
-            if not user_input.strip():
-                continue
+        except (KeyboardInterrupt, EOFError):
+            print("\nSession closing...")
+            break
+
+        if user_input.lower() in ['quit', 'exit']:
+            break
+        if not user_input.strip():
+            continue
+
+        try:
             events = app.stream(
                 {"messages": [HumanMessage(content=user_input)]},
                 config=config,
@@ -277,6 +296,10 @@ def run_repl(app, config):
         except (KeyboardInterrupt, EOFError):
             print("\nSession closing...")
             break
+        except Exception as e:
+            # Don't kill the session over a single failed turn.
+            logger.exception("Error while processing turn")
+            print(f"\n[Error: {e}]\nThe session is still active — try again or type 'quit' to exit.")
 
 
 if __name__ == "__main__":
