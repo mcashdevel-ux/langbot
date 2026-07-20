@@ -111,20 +111,24 @@ def truncate(text: str, max_len: int = 100) -> str:
 # Status messages
 # ═══════════════════════════════════════════════════════════════
 
+def _status(icon: str, color: str, msg: str):
+    _write(f"  {color}{icon}{Style.RESET_ALL} {msg}")
+
+
 def info(msg: str):
-    _write(f"  {Fore.CYAN}\u2139{Style.RESET_ALL} {msg}")
+    _status("\u2139", Fore.CYAN, msg)
 
 
 def success(msg: str):
-    _write(f"  {Fore.GREEN}\u2713{Style.RESET_ALL} {msg}")
+    _status("\u2713", Fore.GREEN, msg)
 
 
 def warning(msg: str):
-    _write(f"  {Fore.YELLOW}\u26a0{Style.RESET_ALL} {msg}")
+    _status("\u26a0", Fore.YELLOW, msg)
 
 
 def error(msg: str):
-    _write(f"  {Fore.RED}\u2717{Style.RESET_ALL} {msg}")
+    _status("\u2717", Fore.RED, msg)
 
 
 # ═══════════════════════════════════════════════════════════════

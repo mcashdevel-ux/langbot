@@ -24,6 +24,7 @@ import chromadb
 from chromadb.config import Settings
 
 from web_tools import search_web as _search_web, fetch_url as _fetch_url, read_scratch as _read_scratch
+from utils import truncate
 
 # ------------------------------------------------------------------------------
 # Configuration
@@ -107,9 +108,7 @@ def execute_shell_command(command: str) -> str:
         output = result.stdout
         if result.stderr:
             output += f"\n[STDERR]:\n{result.stderr}"
-        if len(output) > 20000:
-            return output[:20000] + "\n...[truncated]"
-        return output or f"Command '{command}' executed successfully."
+        return truncate(output) or f"Command '{command}' executed successfully."
     except subprocess.TimeoutExpired:
         return f"Timeout: '{command}'"
     except Exception as e:
@@ -122,10 +121,7 @@ def read_any_file(file_path: str) -> str:
         return f"Error: Path '{file_path}' does not exist."
     try:
         with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-            if len(content) > 20000:
-                return content[:20000] + "\n...[truncated]"
-            return content
+            return truncate(f.read())
     except Exception as e:
         return f"Failed to read {file_path}: {e}"
 
@@ -258,6 +254,31 @@ builder.add_edge("distill", END)
 # ------------------------------------------------------------------------------
 # 8. Execution Loop
 # ------------------------------------------------------------------------------
+def run_repl(app, config):
+    """Interactive read-eval-print loop for a compiled agent app."""
+    while True:
+        try:
+            user_input = input("\nYou: ")
+            if user_input.lower() in ['quit', 'exit']:
+                break
+            if not user_input.strip():
+                continue
+            events = app.stream(
+                {"messages": [HumanMessage(content=user_input)]},
+                config=config,
+                stream_mode="values"
+            )
+            for event in events:
+                latest_msg = event["messages"][-1]
+                if latest_msg.type == "ai" and latest_msg.content:
+                    print(f"\nAgent: {latest_msg.content}")
+                elif latest_msg.type == "tool":
+                    print(f"\n[System: Executed '{latest_msg.name}' -> {len(latest_msg.content)} chars]")
+        except (KeyboardInterrupt, EOFError):
+            print("\nSession closing...")
+            break
+
+
 if __name__ == "__main__":
     print("===================================================================")
     print(" ⚠️ WARNING: THIS AGENT HAS UNRESTRICTED SHELL/FILE/WEB ACCESS ⚠️ ")
@@ -267,48 +288,8 @@ if __name__ == "__main__":
     if SQLITE_AVAILABLE:
         with SqliteSaver.from_conn_string(SQLITE_DB_PATH) as checkpointer:
             app = builder.compile(checkpointer=checkpointer)
-            while True:
-                try:
-                    user_input = input("\nYou: ")
-                    if user_input.lower() in ['quit', 'exit']:
-                        break
-                    if not user_input.strip():
-                        continue
-                    events = app.stream(
-                        {"messages": [HumanMessage(content=user_input)]},
-                        config=config,
-                        stream_mode="values"
-                    )
-                    for event in events:
-                        latest_msg = event["messages"][-1]
-                        if latest_msg.type == "ai" and latest_msg.content:
-                            print(f"\nAgent: {latest_msg.content}")
-                        elif latest_msg.type == "tool":
-                            print(f"\n[System: Executed '{latest_msg.name}' -> {len(latest_msg.content)} chars]")
-                except (KeyboardInterrupt, EOFError):
-                    print("\nSession closing...")
-                    break
+            run_repl(app, config)
     else:
         checkpointer = MemorySaver()
         app = builder.compile(checkpointer=checkpointer)
-        while True:
-            try:
-                user_input = input("\nYou: ")
-                if user_input.lower() in ['quit', 'exit']:
-                    break
-                if not user_input.strip():
-                    continue
-                events = app.stream(
-                    {"messages": [HumanMessage(content=user_input)]},
-                    config=config,
-                    stream_mode="values"
-                )
-                for event in events:
-                    latest_msg = event["messages"][-1]
-                    if latest_msg.type == "ai" and latest_msg.content:
-                        print(f"\nAgent: {latest_msg.content}")
-                    elif latest_msg.type == "tool":
-                        print(f"\n[System: Executed '{latest_msg.name}' -> {len(latest_msg.content)} chars]")
-            except (KeyboardInterrupt, EOFError):
-                print("\nSession closing...")
-                break
+        run_repl(app, config)
