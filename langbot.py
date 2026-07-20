@@ -26,12 +26,12 @@ except ModuleNotFoundError:
 import chromadb
 from chromadb.config import Settings
 
-from web_tools import search_web as _search_web, fetch_url as _fetch_url, read_scratch as _read_scratch
-from utils import truncate
+from components.web_tools import search_web as _search_web, fetch_url as _fetch_url, read_scratch as _read_scratch
+from components.utils import truncate
 
-import console as ui
-from input import read_input, setup_readline
-from vault import (
+import components.console as ui
+from components.input import read_input, setup_readline
+from components.vault import (
     bootstrap as _vault_bootstrap,
     run_action as _vault_run,
     redact as _vault_redact,

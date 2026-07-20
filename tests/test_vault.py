@@ -12,7 +12,7 @@ import os
 
 import pytest
 
-import vault
+import components.vault as vault
 
 
 class _FakeAgent:

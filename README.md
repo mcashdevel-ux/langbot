@@ -109,13 +109,15 @@ runs via the SQLite checkpointer.
 ## Project layout
 
 ```
-langbot.py    # agent loop, tools, memory, LangGraph wiring (entrypoint)
-web_tools.py  # search_web / fetch_url / read_scratch (scratchpad-backed)
-engines.py    # SearXNG engine adapter used by web_tools
-vault.py      # AES-256-GCM credential vault (the `vault` tool + env auto-load + redaction)
-input.py      # readline input UX used by the REPL
-console.py    # terminal UI helpers used by the REPL
-CODE_REVIEW.md# review of the initial commit with known issues + fixes
+langbot.py              # agent loop, tools, memory, LangGraph wiring (entrypoint)
+components/
+  web_tools.py          # search_web / fetch_url / read_scratch (scratchpad-backed)
+  engines.py            # SearXNG engine adapter used by web_tools
+  vault.py              # AES-256-GCM credential vault (the `vault` tool + env auto-load + redaction)
+  input.py              # readline input UX used by the REPL
+  console.py            # terminal UI helpers used by the REPL
+  utils.py              # shared helpers (atomic JSON writes, truncation)
+CODE_REVIEW.md          # review of the initial commit with known issues + fixes
 ```
 
 ## Known issues

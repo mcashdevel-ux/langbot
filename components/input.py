@@ -11,7 +11,7 @@ import re
 import atexit
 from pathlib import Path
 
-from console import (
+from .console import (
     Fore, Style, _write, _term_w, _unicode_safe,
     is_large_paste, collapse_paste, warning,
 )

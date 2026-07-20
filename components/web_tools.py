@@ -16,7 +16,7 @@ import time
 import uuid
 import requests
 
-from engines import search_engine  # your existing module, same directory
+from .engines import search_engine  # sibling module in the components package
 
 SCRATCH_DIR = os.environ.get("AGENT_SCRATCH_DIR", "/tmp/agent_scratch")
 os.makedirs(SCRATCH_DIR, exist_ok=True)

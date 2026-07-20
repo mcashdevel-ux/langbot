@@ -39,7 +39,7 @@ from typing import Dict, Optional, List, Any, Tuple
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from utils import atomic_write_json
+from .utils import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
