@@ -52,8 +52,8 @@ from components.vault import (
 # ------------------------------------------------------------------------------
 BASE_URL = "http://127.0.0.1:8080/v1"
 LLM_MODEL = "local-model"
-SQLITE_DB_PATH = "./agent_checkpoints.db"
-CHROMA_PERSIST_DIR = "./agent_memory_chroma"
+SQLITE_DB_PATH = "./memory/agent_checkpoints.db"
+CHROMA_PERSIST_DIR = "./memory/agent_memory_chroma"
 
 # ------------------------------------------------------------------------------
 # 0. Credential Vault — load stored secrets into the environment before the LLM
