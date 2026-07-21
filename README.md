@@ -16,6 +16,14 @@ long-term memory (Chroma + sentence-transformers).
   from each exchange into long-term memory.
 - **Long-term memory** — Chroma vector store (`agent_memory_chroma/`) with
   `remember` / `recall` tools plus automatic distillation.
+- **File & code tools** (`components/file_ops.py`, `components/code_search.py`) — hardened
+  `read_any_file`/`write_any_file` (binary detection, idempotent writes), surgical
+  `patch_file`/`batch_patch` (find/replace with `.py` syntax-check + auto-rollback),
+  `git_diff`, and `find_in_files`/`read_many_files`/`glob_list` for navigation.
+- **Background task manager** (`components/tasks.py`) — run long-lived commands (servers,
+  watchers) with `task_start` and actively manage them via `task_list`/`task_status`/
+  `task_output`/`task_kill`; output is captured to `./memory/agent_tasks` and a monitor
+  thread updates each task's status the moment it exits.
 - **Web tools** (`components/web_tools.py`) — `search_web` and `fetch_url` (via Jina Reader)
   that save full payloads to an on-disk scratchpad and return short, context-cheap previews;
   `read_scratch` pages through the rest.
@@ -82,6 +90,8 @@ Environment variables:
   `/etc/searxng/settings.yml`, then the source's bundled settings).
 - `AGENT_SCRATCH_DIR` — where web scratch files are written (default
   `./memory/agent_scratch`, per `MEMORY_POLICY.md`).
+- `AGENT_TASKS_DIR` — where background task logs are written (default
+  `./memory/agent_tasks`).
 - `LANGBOT_VAULT_PASSWORD` — if set, the vault master key is wrapped with a
   password-derived key instead of being stored in recoverable form on disk.
 
@@ -102,6 +112,10 @@ You: search the web for the latest langgraph release and summarize it
 Type `quit` or `exit` (or Ctrl+C / Ctrl+D) to leave. Conversation state persists across
 runs via the SQLite checkpointer.
 
+Local REPL commands (not sent to the model): `/help`, `/new` (or `/clear`, starts a fresh
+conversation thread), `/info`, `/health`, `/ls [dir]`, `/knowledge <query>`, `/save <fact>`,
+`/quit`.
+
 ### Tests
 
 The `components/` modules have a unit-test suite (the heavy LLM deps and a live LLM server
@@ -114,8 +128,10 @@ python -m pytest
 
 ### Available tools
 
-`execute_shell_command`, `read_any_file`, `write_any_file`, `search_web`, `fetch_url`,
-`read_scratch`, `remember`, `recall`, `vault`.
+`execute_shell_command`, `read_any_file`, `write_any_file`, `patch_file`, `batch_patch`,
+`git_diff`, `find_in_files`, `read_many_files`, `glob_list`, `task_start`, `task_list`,
+`task_status`, `task_output`, `task_kill`, `search_web`, `fetch_url`, `read_scratch`,
+`remember`, `recall`, `vault`.
 
 ## Security notes
 
@@ -131,6 +147,9 @@ python -m pytest
 ```
 langbot.py              # agent loop, tools, memory, LangGraph wiring (entrypoint)
 components/
+  file_ops.py           # read/write/patch/batch_patch/git_diff file tools
+  code_search.py        # find_in_files / read_many_files / glob_list
+  tasks.py              # background task manager (start/list/status/output/kill)
   web_tools.py          # search_web / fetch_url / read_scratch (scratchpad-backed)
   engines.py            # SearXNG engine adapter used by web_tools
   vault.py              # AES-256-GCM credential vault (the `vault` tool + env auto-load + redaction)
