@@ -42,15 +42,19 @@ long-term memory (Chroma + sentence-transformers).
 
 ### Python dependencies
 
-There is no runtime dependency manifest yet (dev/test deps are in `requirements-dev.txt`).
-Install the packages the code imports:
+Runtime dependencies are declared in `requirements.txt` (and `pyproject.toml`,
+which also pins `requires-python >= 3.10`). Install them with:
 
 ```bash
-pip install \
-  langchain-core langchain-openai langchain-huggingface \
-  langgraph langgraph-checkpoint-sqlite \
-  chromadb sentence-transformers \
-  cryptography requests httpx colorama rich
+pip install -r requirements.txt
+# or, as a package:  pip install .
+```
+
+For development and running the test suite, use `requirements-dev.txt` (it
+includes the runtime deps plus `pytest`):
+
+```bash
+pip install -r requirements-dev.txt
 ```
 
 `components/engines.py` additionally needs the SearXNG source on disk. Place it at one of
@@ -76,8 +80,8 @@ Environment variables:
 
 - `SEARXNG_SETTINGS_PATH` — path to a SearXNG `settings.yml` (defaults to
   `/etc/searxng/settings.yml`, then the source's bundled settings).
-- `AGENT_SCRATCH_DIR` — where web scratch files are written (default `/tmp/agent_scratch`;
-  note `/tmp` may be cleared between reboots).
+- `AGENT_SCRATCH_DIR` — where web scratch files are written (default
+  `./memory/agent_scratch`, per `MEMORY_POLICY.md`).
 - `LANGBOT_VAULT_PASSWORD` — if set, the vault master key is wrapped with a
   password-derived key instead of being stored in recoverable form on disk.
 

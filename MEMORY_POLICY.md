@@ -37,7 +37,7 @@ agent_checkpoints.db*         # legacy, kept for safe cleanup
 ```
 
 ### Environment Variables
-- `AGENT_SCRATCH_DIR` — defaults to `/tmp/agent_scratch` (can be changed)
+- `AGENT_SCRATCH_DIR` — defaults to `./memory/agent_scratch` (can be changed)
 - `SQLITE_DB_PATH` — defaults to `./memory/agent_checkpoints.db`
 - `CHROMA_PERSIST_DIR` — defaults to `./memory/agent_memory_chroma`
 - `LANGBOT_VAULT_PASSWORD` — optional, for vault key wrapping

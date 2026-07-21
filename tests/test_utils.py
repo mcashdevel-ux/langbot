@@ -14,6 +14,26 @@ import pytest
 import components.utils as utils
 
 
+class TestStripCodeFences:
+    def test_plain_text_unchanged(self):
+        assert utils.strip_code_fences('["a", "b"]') == '["a", "b"]'
+
+    def test_multiline_fence_with_lang_tag(self):
+        raw = '```json\n["a", "b"]\n```'
+        assert utils.strip_code_fences(raw) == '["a", "b"]'
+
+    def test_multiline_fence_no_lang_tag(self):
+        raw = '```\n[]\n```'
+        assert utils.strip_code_fences(raw) == '[]'
+
+    def test_single_line_fence_does_not_raise(self):
+        # A single-line fenced reply (no newline) used to raise IndexError.
+        assert utils.strip_code_fences('```["x"]```') == '["x"]'
+
+    def test_surrounding_whitespace(self):
+        assert utils.strip_code_fences('  ```json\n[1]\n```  ') == '[1]'
+
+
 class TestSuppressNativeOutput:
     def test_suppresses_fd_level_writes(self, capfd):
         # capfd captures at the fd level (like the real terminal would receive).
