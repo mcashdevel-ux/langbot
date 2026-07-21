@@ -12,6 +12,7 @@ import subprocess
 import json
 import logging
 import uuid
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -101,43 +102,90 @@ def _load_embeddings():
     return model
 
 
-embeddings = _load_embeddings()
+embeddings = None
 
 # ------------------------------------------------------------------------------
 # 2. Semantic Memory Store
 # ------------------------------------------------------------------------------
-chroma_client = chromadb.PersistentClient(
-    path=CHROMA_PERSIST_DIR,
-    settings=Settings(anonymized_telemetry=False),
-)
-memory_collection = chroma_client.get_or_create_collection(
-    name="agent_longterm_memory",
-    metadata={"hnsw:space": "cosine"},
-)
+chroma_client = None
+memory_collection = None
+
+# Background warmup for embeddings and chroma to avoid heavy import-time stalls.
+_warmup_started = False
+_warmup_lock = threading.Lock()
+
+
+def _do_warmup():
+    """Initialize embeddings and chroma in a background thread."""
+    global embeddings, chroma_client, memory_collection, _warmup_started
+    try:
+        embeddings = _load_embeddings()
+    except Exception as e:
+        logger.warning("Embeddings warmup failed: %s", e)
+    try:
+        chroma_client = chromadb.PersistentClient(
+            path=CHROMA_PERSIST_DIR,
+            settings=Settings(anonymized_telemetry=False),
+        )
+        memory_collection = chroma_client.get_or_create_collection(
+            name="agent_longterm_memory",
+            metadata={"hnsw:space": "cosine"},
+        )
+    except Exception as e:
+        logger.warning("Chroma warmup failed: %s", e)
+    _warmup_started = True
+
+
+def _ensure_warmup_started():
+    """Start the warmup in background if not already started."""
+    global _warmup_started
+    if _warmup_started:
+        return
+    with _warmup_lock:
+        if _warmup_started:
+            return
+        t = threading.Thread(target=_do_warmup, daemon=True)
+        t.start()
+
 
 def _store_memory(text: str) -> str:
-    mem_id = str(uuid.uuid4())
-    vector = embeddings.embed_query(text)
-    memory_collection.add(
-        ids=[mem_id],
-        embeddings=[vector],
-        metadatas=[{"text": text, "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}],
-    )
-    return mem_id
+    """Manually store a fact in long-term memory. If warmup is ongoing, start it and fail fast."""
+    _ensure_warmup_started()
+    if embeddings is None or memory_collection is None:
+        return "Memory system initializing — try again in a few seconds."
+    try:
+        mem_id = str(uuid.uuid4())
+        vector = embeddings.embed_query(text)
+        memory_collection.add(
+            ids=[mem_id],
+            embeddings=[vector],
+            metadatas=[{"text": text, "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}],
+        )
+        return mem_id
+    except Exception as e:
+        return f"Failed to store memory: {e}"
+
 
 def _recall_memories(query: str, n: int = 3) -> list[str]:
-    count = memory_collection.count()
-    if count == 0:
-        # Chroma rejects n_results < 1, so guard the empty-store case explicitly.
+    """Recall memories; if memory system not ready return empty list."""
+    _ensure_warmup_started()
+    if memory_collection is None or embeddings is None:
         return []
-    query_vec = embeddings.embed_query(query)
-    results = memory_collection.query(
-        query_embeddings=[query_vec],
-        n_results=min(n, count),
-    )
-    if not results or not results["metadatas"] or not results["metadatas"][0]:
+    try:
+        count = memory_collection.count()
+        if count == 0:
+            return []
+        query_vec = embeddings.embed_query(query)
+        results = memory_collection.query(
+            query_embeddings=[query_vec],
+            n_results=min(n, count),
+        )
+        if not results or not results.get("metadatas") or not results["metadatas"][0]:
+            return []
+        return [meta.get("text", "") for meta in results["metadatas"][0] if meta.get("text")]
+    except Exception as e:
+        logger.warning("Memory recall failed: %s", e)
         return []
-    return [meta.get("text", "") for meta in results["metadatas"][0] if meta.get("text")]
 
 # ------------------------------------------------------------------------------
 # 3. Tools (original + memory)
