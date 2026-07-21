@@ -1,0 +1,14 @@
+# Runtime dependencies for langbot (see README for the SearXNG source setup,
+# which components/engines.py clones/loads separately).
+langchain-core
+langchain-openai
+langchain-huggingface
+langgraph
+langgraph-checkpoint-sqlite
+chromadb
+sentence-transformers
+cryptography
+requests>=2.31
+httpx>=0.27
+colorama>=0.4.6
+rich
