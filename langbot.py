@@ -36,7 +36,20 @@ import chromadb
 from chromadb.config import Settings
 
 from components.web_tools import search_web as _search_web, fetch_url as _fetch_url, read_scratch as _read_scratch
-from components.utils import truncate, suppress_native_output
+from components.utils import truncate, suppress_native_output, strip_code_fences
+from components.file_ops import (
+    read_file as _read_file,
+    write_file as _write_file,
+    patch_file as _patch_file,
+    batch_patch as _batch_patch,
+    git_diff as _git_diff,
+)
+from components.code_search import (
+    find_in_files as _find_in_files,
+    read_many_files as _read_many_files,
+    glob_list as _glob_list,
+)
+from components import tasks as _tasks
 
 import components.console as ui
 from components.input import read_input, setup_readline
@@ -113,14 +126,18 @@ def _store_memory(text: str) -> str:
     return mem_id
 
 def _recall_memories(query: str, n: int = 3) -> list[str]:
+    count = memory_collection.count()
+    if count == 0:
+        # Chroma rejects n_results < 1, so guard the empty-store case explicitly.
+        return []
     query_vec = embeddings.embed_query(query)
     results = memory_collection.query(
         query_embeddings=[query_vec],
-        n_results=min(n, memory_collection.count()),
+        n_results=min(n, count),
     )
     if not results or not results["metadatas"] or not results["metadatas"][0]:
         return []
-    return [meta["text"] for meta in results["metadatas"][0]]
+    return [meta.get("text", "") for meta in results["metadatas"][0] if meta.get("text")]
 
 # ------------------------------------------------------------------------------
 # 3. Tools (original + memory)
@@ -146,40 +163,107 @@ def recall(query: str, n: int = 3) -> str:
         return f"Failed to recall memories: {e}"
 
 @tool
-def execute_shell_command(command: str) -> str:
-    """Execute a bash command."""
+def execute_shell_command(command: str, cwd: str = "", timeout: int = 120) -> str:
+    """Execute a shell command synchronously and return its output.
+
+    Optionally run in ``cwd`` with a custom ``timeout`` (seconds; 0 = no limit).
+    For servers, watchers, or anything long-running, use 'task_start' instead so
+    the process is tracked and can be inspected or killed.
+    """
     try:
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            command, shell=True, capture_output=True, text=True,
+            timeout=timeout if timeout and timeout > 0 else None,
+            cwd=cwd or None,
+        )
         output = result.stdout
         if result.stderr:
             output += f"\n[STDERR]:\n{result.stderr}"
+        if result.returncode:
+            output += f"\n[Exit code: {result.returncode}]"
         return truncate(output) or f"Command '{command}' executed successfully."
     except subprocess.TimeoutExpired:
-        return f"Timeout: '{command}'"
+        return f"Timeout ({timeout}s): '{command}'"
     except Exception as e:
         return f"Execution failed: {e}"
 
 @tool
 def read_any_file(file_path: str) -> str:
-    """Read any file."""
-    if not os.path.exists(file_path):
-        return f"Error: Path '{file_path}' does not exist."
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            return truncate(f.read())
-    except Exception as e:
-        return f"Failed to read {file_path}: {e}"
+    """Read any text file. Binary files are reported by size, not dumped."""
+    return _read_file(file_path)
 
 @tool
-def write_any_file(file_path: str, content: str) -> str:
-    """Write content to any file."""
-    try:
-        os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(content)
-        return f"Wrote {len(content)} characters to '{file_path}'."
-    except Exception as e:
-        return f"Failed to write: {e}"
+def write_any_file(file_path: str, content: str, append: bool = False) -> str:
+    """Write content to any file (overwrite, or append=True).
+
+    Overwrites are idempotent (skipped when unchanged). To make a small change to
+    an existing file, prefer 'patch_file' over rewriting the whole thing.
+    """
+    return _write_file(file_path, content, append=append)
+
+@tool
+def patch_file(file_path: str, old_text: str, new_text: str) -> str:
+    """Surgically replace the first occurrence of old_text with new_text in a file.
+
+    Prefer this over rewriting whole files. For .py files the result is
+    syntax-checked and automatically rolled back on error. Idempotent: a no-op
+    if the change is already applied.
+    """
+    return _patch_file(file_path, old_text, new_text)
+
+@tool
+def batch_patch(patches: list[dict]) -> str:
+    """Apply multiple {file_path, old_text, new_text} patches in one call."""
+    return _batch_patch(patches)
+
+@tool
+def git_diff(file_path: str = ".", cached: bool = False) -> str:
+    """Show the git diff for a file or directory (cached=True for staged)."""
+    return _git_diff(file_path, cached=cached)
+
+@tool
+def find_in_files(pattern: str, path: str = ".") -> str:
+    """Search for a text pattern across source/text files (recursive)."""
+    return _find_in_files(pattern, path)
+
+@tool
+def read_many_files(pattern: str, max_files: int = 20) -> str:
+    """Read multiple files matching a glob pattern (e.g. 'src/**/*.py')."""
+    return _read_many_files(pattern, max_files=max_files)
+
+@tool
+def glob_list(pattern: str, max_results: int = 100) -> str:
+    """List files matching a glob pattern with sizes (does not read contents)."""
+    return _glob_list(pattern, max_results=max_results)
+
+@tool
+def task_start(command: str, cwd: str = "") -> str:
+    """Start a long-running command as a managed background task; returns its id.
+
+    Use for servers, watchers, or anything that should keep running while you
+    continue working. Inspect with task_list/task_output; stop with task_kill.
+    """
+    return _tasks.task_start(command, cwd=cwd)
+
+@tool
+def task_list() -> str:
+    """List background tasks and their status."""
+    return _tasks.task_list()
+
+@tool
+def task_status(task_id: str) -> str:
+    """Show the status of one background task."""
+    return _tasks.task_status(task_id)
+
+@tool
+def task_output(task_id: str, offset: int = 0) -> str:
+    """Read a background task's captured output, paged by byte offset."""
+    return _tasks.task_output(task_id, offset=offset)
+
+@tool
+def task_kill(task_id: str) -> str:
+    """Terminate a running background task."""
+    return _tasks.task_kill(task_id)
 
 @tool
 def search_web(query: str, engine: str = "duckduckgo", max_results: int = 5) -> str:
@@ -212,6 +296,9 @@ def vault(action: str, name: str = "", value: str = "") -> str:
 
 tools = [
     execute_shell_command, read_any_file, write_any_file,
+    patch_file, batch_patch, git_diff,
+    find_in_files, read_many_files, glob_list,
+    task_start, task_list, task_status, task_output, task_kill,
     search_web, fetch_url, read_scratch,
     remember, recall, vault,
 ]
@@ -230,6 +317,10 @@ system_prompt = SystemMessage(content=(
     "You have long-term memory tools ('remember' and 'recall'), but the system also automatically "
     "distills important facts from our conversation. Use 'recall' to retrieve relevant past "
     "information before tackling new tasks.\n\n"
+    "For editing files, prefer 'patch_file' (surgical find/replace) over rewriting whole files, "
+    "and use 'find_in_files'/'read_many_files'/'glob_list' to navigate code. Run long-lived "
+    "processes (servers, watchers) with 'task_start' and manage them via task_list/task_output/"
+    "task_kill instead of blocking shell calls.\n\n"
     "Be concise but thorough – give complete answers, not play‑by‑play commentary."
 ))
 
@@ -275,14 +366,14 @@ Do not include explanations, markdown, or extra text.
 """
     try:
         raw = llm.invoke(distillation_prompt).content.strip()
-        # Remove possible markdown fences
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1]
-            if raw.endswith("```"):
-                raw = raw[:-3]
+        raw = strip_code_fences(raw)
         facts = json.loads(raw)
+        if not isinstance(facts, list):
+            logger.warning("Knowledge distillation skipped: model output was not a JSON array")
+            return state
         for fact in facts:
-            _store_memory(fact)
+            if isinstance(fact, str) and fact.strip():
+                _store_memory(fact)
             # Optional console feedback – quiet by default
     except json.JSONDecodeError as e:
         # Model returned something that wasn't a JSON array; distillation is a
@@ -390,6 +481,75 @@ def _stream_turn(app, config, user_input: str) -> None:
             spinner.stop()
 
 
+_SLASH_HELP = [
+    ("/help", "Show this help"),
+    ("/quit, /exit", "End the session"),
+    ("/new, /clear", "Start a fresh conversation (new memory thread)"),
+    ("/info", "Show model, tool count, thread, memory size"),
+    ("/health", "Show checkpointer, memory, vault, and task status"),
+    ("/ls [dir]", "List files in a directory"),
+    ("/knowledge <q>", "Search long-term memory"),
+    ("/save <fact>", "Store a fact in long-term memory"),
+]
+
+
+def _handle_slash(text: str, config: dict) -> bool:
+    """Handle a /command. Returns True if the session should end.
+
+    These are local REPL commands (advertised by input.py's tab-completer);
+    they never reach the LLM.
+    """
+    parts = text[1:].strip().split(maxsplit=1)
+    cmd = parts[0].lower() if parts else ""
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    if cmd in ("quit", "exit"):
+        return True
+    if cmd == "help":
+        ui.header("Commands")
+        for name, desc in _SLASH_HELP:
+            ui.kv(name, desc)
+        return False
+    if cmd in ("new", "clear"):
+        new_id = f"session_{uuid.uuid4().hex[:8]}"
+        config["configurable"]["thread_id"] = new_id
+        ui.success(f"Started a fresh conversation (thread {new_id}).")
+        return False
+    if cmd == "info":
+        ui.kv("model", LLM_MODEL)
+        ui.kv("tools", str(len(tools)))
+        ui.kv("thread_id", config["configurable"]["thread_id"])
+        ui.kv("memories", str(memory_collection.count()))
+        ui.kv("checkpointer", "sqlite" if SQLITE_AVAILABLE else "memory")
+        return False
+    if cmd == "health":
+        ui.kv("checkpointer", "sqlite" if SQLITE_AVAILABLE else "memory")
+        ui.kv("memories", str(memory_collection.count()))
+        ui.kv("vault creds", str(len(_VAULT_ENV_LOADED)))
+        ui.kv("bg tasks", str(len(_tasks.manager.list())))
+        return False
+    if cmd == "ls":
+        ui.info(_glob_list(os.path.join(arg or ".", "*")))
+        return False
+    if cmd == "knowledge":
+        if not arg:
+            ui.warning("Usage: /knowledge <query>")
+            return False
+        mems = _recall_memories(arg, n=5)
+        ui.info("\n".join(f"- {m}" for m in mems) if mems else "No relevant memories.")
+        return False
+    if cmd == "save":
+        if not arg:
+            ui.warning("Usage: /save <fact to remember>")
+            return False
+        _store_memory(arg)
+        ui.success("Saved to long-term memory.")
+        return False
+
+    ui.warning(f"Unknown command: /{cmd}  (try /help)")
+    return False
+
+
 def run_repl(app, config):
     """Interactive read-eval-print loop.
 
@@ -406,9 +566,13 @@ def run_repl(app, config):
             ui.info("Session closing...")
             break
 
-        if user_input.lower() in ['quit', 'exit']:
-            break
         if not user_input.strip():
+            continue
+        if user_input.strip().lower() in ('quit', 'exit'):
+            break
+        if user_input.startswith('/'):
+            if _handle_slash(user_input, config):
+                break
             continue
 
         try:
@@ -427,7 +591,8 @@ def run_repl(app, config):
             ui.info("The session is still active — try again or type 'quit' to exit.")
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Console entrypoint: set up the REPL, compile the graph, and run it."""
     setup_readline()
     ui.banner("langbot", "unrestricted shell / file / web agent")
     ui.warning("This agent has UNRESTRICTED shell, file, and web access.")
@@ -447,3 +612,7 @@ if __name__ == "__main__":
             run_repl(app, config)
     finally:
         _vault_save()
+
+
+if __name__ == "__main__":
+    main()

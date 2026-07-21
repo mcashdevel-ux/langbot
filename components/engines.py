@@ -1,16 +1,17 @@
 """SearXNG Engine Adapter — run SearXNG engines directly, no webapp needed.
 
 Loads any SearXNG engine module and calls request()/response() directly,
-using SAGE's HTTP stack. Supports all 227 engines from SearXNG.
+using a plain ``requests`` HTTP stack. Supports the engines defined in the
+SearXNG settings.
 
 Usage:
-    from features.engines import search_engine
-    
+    from components.engines import search_engine
+
     # Simple interface
     results = search_engine("arxiv", "machine learning")
     for r in results:
         print(r["title"], r["url"])
-    
+
     # With options
     results = search_engine("google", "latest news", pageno=2, lang="en-US")
 """
@@ -146,8 +147,8 @@ class _HttpxResponseWrapper:
 
 def _make_http_request(params: dict) -> requests.Response:
     """Execute the HTTP request built by an engine's request() function.
-    
-    Uses requests.Session (SAGE's stack) with timeout and proper handling.
+
+    Uses a ``requests.Session`` with a timeout and proper handling.
     """
     method = params.get("method", "GET")
     url = params.get("url", "")

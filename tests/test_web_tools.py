@@ -62,6 +62,31 @@ class TestScratch:
         out = web_tools.read_scratch(sid, offset=-50)
         assert "data here" in out
 
+    def test_read_non_ascii_byte_offsets_consistent(self):
+        # Multi-byte content: offsets/total are byte-based and consistent, and
+        # a chunk boundary must not corrupt output or over-report "more".
+        content = "café-\u00e9\u00e9\u00e9" * 50  # 'é' is 2 bytes in UTF-8
+        sid = web_tools.save_to_scratch(content)
+        total_bytes = len(content.encode("utf-8"))
+        out = web_tools.read_scratch(sid, offset=0, length=total_bytes)
+        assert f"/{total_bytes}]" in out
+        assert "more available" not in out
+        # Reassemble via paging and confirm it round-trips exactly.
+        reassembled = ""
+        offset = 0
+        while True:
+            page = web_tools.read_scratch(sid, offset=offset, length=7)
+            body = page.split("\n", 1)[1]
+            if body.endswith(")"):
+                body = body.rsplit("\n...", 1)[0]
+            reassembled += body
+            marker = page.split("]", 1)[0]
+            end = int(marker.split("-")[1].split("/")[0])
+            if "more available" not in page:
+                break
+            offset = end
+        assert reassembled == content
+
 
 # ---------------------------------------------------------------------------
 # search_web
