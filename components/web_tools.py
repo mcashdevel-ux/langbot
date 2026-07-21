@@ -83,19 +83,33 @@ def read_scratch(scratch_id: str, offset: int = 0, length: int = 1500) -> str:
 def search_web(query: str, engine: str = "duckduckgo", max_results: int = 5) -> str:
     """Run a search through engines.py and return a compact, context-cheap
     summary. Full result set (titles, urls, content snippets) is saved to
-    scratch for deep-diving via read_scratch."""
+    scratch for deep-diving via read_scratch. Automatically falls back to
+    alternate engines if the primary returns no results."""
     max_results = min(int(max_results or 5), SEARCH_MAX_RESULTS)
-    try:
-        results = search_engine(engine, query, max_results=max_results)
-    except Exception as e:
-        return f"search error ({engine}): {e}"
+    engines_to_try = [engine] + [e for e in ["duckduckgo", "searxng", "bing", "google"] if e != engine]
+    results = None
+    used_engine = engine
+    last_error = None
+    for eng in engines_to_try:
+        try:
+            res = search_engine(eng, query, max_results=max_results)
+            if res:
+                results = res
+                used_engine = eng
+                break
+        except Exception as e:
+            if eng == engine:
+                last_error = e
+            continue
 
     if not results:
-        return f"no results from '{engine}' for: {query}"
+        if last_error:
+            return f"search error ({engine}): {last_error}"
+        return f"no results found for: {query}"
 
     sid = save_to_scratch(json.dumps(results, indent=2, ensure_ascii=False), prefix="search")
 
-    lines = [f"Search results for '{query}' via {engine} (full data at scratch:{sid}):"]
+    lines = [f"Search results for '{query}' via {used_engine} (full data at scratch:{sid}):"]
     for i, r in enumerate(results, 1):
         snippet = (r.get("content") or "")[:SEARCH_SNIPPET_CHARS].replace("\n", " ")
         lines.append(f"{i}. {r.get('title', '(no title)')} — {r.get('url', '')}\n   {snippet}")
