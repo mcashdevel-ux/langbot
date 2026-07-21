@@ -80,10 +80,14 @@ _VAULT_ENV_LOADED = _vault_bootstrap()
 # ------------------------------------------------------------------------------
 llm = ChatOpenAI(model=LLM_MODEL, base_url=BASE_URL, api_key="not-needed", temperature=0.1)
 
-def _load_embeddings():
+def _load_embeddings(use_fd_redirect: bool = True):
     """Construct the embedding model without leaking its loading progress bars
     onto the console. The heavy transformers/tqdm output is written to the raw
-    stderr fd, so we mute it at the fd level while the weights load."""
+    stderr fd, so we mute it while the weights load.
+
+    If use_fd_redirect is False, fall back to Python-level redirection which is
+    safer when running under pytest/capture or in background threads.
+    """
     ui.info("Loading embedding model...")
     try:
         import transformers  # noqa: WPS433 (optional, only to quiet it)
@@ -92,12 +96,23 @@ def _load_embeddings():
         transformers.logging.disable_progress_bar()
     except Exception:
         pass
-    with suppress_native_output():
-        model = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            model_kwargs={'device': 'cpu'},
-            encode_kwargs={'normalize_embeddings': True},
-        )
+    if use_fd_redirect:
+        # Use the full native fd-level suppression where available.
+        with suppress_native_output():
+            model = HuggingFaceEmbeddings(
+                model_name="sentence-transformers/all-MiniLM-L6-v2",
+                model_kwargs={'device': 'cpu'},
+                encode_kwargs={'normalize_embeddings': True},
+            )
+    else:
+        # Safer Python-level redirection (may not silence native C-level output).
+        import contextlib, os, sys
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+            model = HuggingFaceEmbeddings(
+                model_name="sentence-transformers/all-MiniLM-L6-v2",
+                model_kwargs={'device': 'cpu'},
+                encode_kwargs={'normalize_embeddings': True},
+            )
     ui.success("Embedding model ready.")
     return model
 
@@ -113,14 +128,20 @@ memory_collection = None
 # Background warmup for embeddings and chroma to avoid heavy import-time stalls.
 _warmup_started = False
 _warmup_lock = threading.Lock()
+embeddings_ready = False
+chroma_ready = False
 
 
 def _do_warmup():
     """Initialize embeddings and chroma in a background thread."""
-    global embeddings, chroma_client, memory_collection, _warmup_started
+    global embeddings, chroma_client, memory_collection, _warmup_started, embeddings_ready, chroma_ready
     try:
-        embeddings = _load_embeddings()
+        # When warming up in background threads, use the safer python-level redirect
+        # to avoid interfering with pytest/system capture that depends on file descriptors.
+        embeddings = _load_embeddings(use_fd_redirect=False)
+        embeddings_ready = True
     except Exception as e:
+        embeddings_ready = False
         logger.warning("Embeddings warmup failed: %s", e)
     try:
         chroma_client = chromadb.PersistentClient(
@@ -131,7 +152,9 @@ def _do_warmup():
             name="agent_longterm_memory",
             metadata={"hnsw:space": "cosine"},
         )
+        chroma_ready = True
     except Exception as e:
+        chroma_ready = False
         logger.warning("Chroma warmup failed: %s", e)
     _warmup_started = True
 
@@ -572,7 +595,13 @@ def _handle_slash(text: str, config: dict) -> bool:
         return False
     if cmd == "health":
         ui.kv("checkpointer", "sqlite" if SQLITE_AVAILABLE else "memory")
-        ui.kv("memories", str(memory_collection.count()))
+        try:
+            mem_count = memory_collection.count() if memory_collection is not None else 0
+        except Exception:
+            mem_count = 0
+        ui.kv("memories", str(mem_count))
+        ui.kv("embeddings_ready", str(embeddings_ready))
+        ui.kv("chroma_ready", str(chroma_ready))
         ui.kv("vault creds", str(len(_VAULT_ENV_LOADED)))
         ui.kv("bg tasks", str(len(_tasks.manager.list())))
         return False
@@ -647,6 +676,9 @@ def main() -> None:
     if _VAULT_ENV_LOADED:
         ui.info(f"Vault: loaded {len(_VAULT_ENV_LOADED)} credential(s) into the environment.")
     ui.startup_tip(LLM_MODEL)
+    # Show warmup status (non-blocking)
+    ui.kv("embeddings_ready", str(embeddings_ready))
+    ui.kv("chroma_ready", str(chroma_ready))
     config = {"configurable": {"thread_id": "root_access_session_1"}}
 
     try:
