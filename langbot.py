@@ -77,7 +77,13 @@ _VAULT_ENV_LOADED = _vault_bootstrap()
 # ------------------------------------------------------------------------------
 # 1. LLM & Embeddings
 # ------------------------------------------------------------------------------
-llm = ChatOpenAI(model=LLM_MODEL, base_url=BASE_URL, api_key="not-needed", temperature=0.1)
+llm = ChatOpenAI(
+    model=LLM_MODEL,
+    base_url=BASE_URL,
+    api_key="not-needed",
+    temperature=0.1,
+    max_retries=10,
+)
 
 def _load_embeddings():
     """Construct the embedding model without leaking its loading progress bars
@@ -309,19 +315,13 @@ llm_with_tools = llm.bind_tools(tools)
 # ------------------------------------------------------------------------------
 system_prompt = SystemMessage(content=(
     "You are a fully autonomous AI assistant with unrestricted shell, file, and web access, "
-    "as well as a persistent, searchable long-term memory. You act proactively: if a task "
-    "can be done safely, do it without asking. Only request explicit user confirmation for "
-    "potentially destructive operations.\n\n"
-    "When using tools: if a call does not yield the desired result, immediately try alternative "
-    "parameters, engines, or approaches. Do not stop to ask the user for guidance.\n\n"
-    "You have long-term memory tools ('remember' and 'recall'), but the system also automatically "
-    "distills important facts from our conversation. Use 'recall' to retrieve relevant past "
-    "information before tackling new tasks.\n\n"
-    "For editing files, prefer 'patch_file' (surgical find/replace) over rewriting whole files, "
-    "and use 'find_in_files'/'read_many_files'/'glob_list' to navigate code. Run long-lived "
-    "processes (servers, watchers) with 'task_start' and manage them via task_list/task_output/"
-    "task_kill instead of blocking shell calls.\n\n"
-    "Be concise but thorough – give complete answers, not play‑by‑play commentary."
+    "as well as a persistent, searchable long-term memory. You act proactively and execute multi-step tasks to completion.\n\n"
+    "CRITICAL AUTONOMY RULES:\n"
+    "1. REASONING & CHAIN-OF-THOUGHT (CoT): Think step-by-step about what needs to be done. Formulate a plan and execute it using tools immediately.\n"
+    "2. NEVER ASK FOR PERMISSION: Do NOT output phrases like 'Would you like me to proceed?', 'Should I fetch...', or 'Shall I run...'. If the user asks for a task (e.g. 'validate all secrets'), DO NOT describe how you would do it in text — ACTUALLY INVOKE THE TOOLS to execute it right now.\n"
+    "3. NO FAKE TOOL EXECUTION: Never write pseudo-code, fake JSON, or dummy curl commands in markdown text blocks. Call actual tools (`vault`, `execute_shell_command`, `search_web`, etc.) to get real results.\n"
+    "4. AUTOMATIC MULTI-STEP RETRY: If a tool call fails or returns empty/partial results, try alternative parameters, tools, or shell commands immediately in the same turn. Do not stop and hand control back to the user until the full objective is achieved.\n\n"
+    "For editing files, prefer 'patch_file' over rewriting whole files. For background tasks, use 'task_start'. Use 'recall' to check long-term memory when relevant."
 ))
 
 # ------------------------------------------------------------------------------
@@ -385,7 +385,7 @@ Do not include explanations, markdown, or extra text.
     return state
 
 # ------------------------------------------------------------------------------
-# 7. Build Graph with Distillation
+# 7. Build Graph with Distillation & Autonomous Guardrail
 # ------------------------------------------------------------------------------
 _tool_node = ToolNode(tools)
 
@@ -400,22 +400,56 @@ def tools_node(state: MessagesState):
             msg.content = _vault_redact(msg.content)
     return result
 
-builder = StateGraph(MessagesState)
-builder.add_node("agent", agent)
-builder.add_node("tools", tools_node)
-builder.add_node("distill", distill_knowledge)
+def nudge_agent(state: MessagesState):
+    """Nudge node: if the model asked for permission instead of running tools,
+    remind it to execute autonomously without stopping."""
+    nudge_msg = SystemMessage(content=(
+        "[AUTONOMOUS AGENT DIRECTIVE]: Do not ask for permission or confirmation. "
+        "Formulate a plan and invoke the required tool calls immediately to complete the user request."
+    ))
+    return {"messages": [nudge_msg]}
 
-builder.add_edge(START, "agent")
+PERMISSION_PHRASES = (
+    "would you like me to",
+    "would you like to proceed",
+    "should i proceed",
+    "shall i proceed",
+    "do you want me to",
+    "can i proceed",
+    "let me know if you would like",
+    "if you would like me to",
+    "would you like to",
+)
 
-# After agent: if there are tool calls -> tools, else -> distill
 def route_agent(state: MessagesState):
     last_msg = state["messages"][-1]
     if last_msg.type == "ai" and hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
         return "tools"
+
+    if last_msg.type == "ai" and isinstance(getattr(last_msg, "content", None), str):
+        content_lower = last_msg.content.lower()
+        if any(phrase in content_lower for phrase in PERMISSION_PHRASES):
+            ai_since_human = 0
+            for m in reversed(state["messages"]):
+                if isinstance(m, HumanMessage):
+                    break
+                if getattr(m, "type", None) == "ai":
+                    ai_since_human += 1
+            if ai_since_human < 3:
+                return "nudge"
+
     return "distill"
 
-builder.add_conditional_edges("agent", route_agent, ["tools", "distill"])
+builder = StateGraph(MessagesState)
+builder.add_node("agent", agent)
+builder.add_node("tools", tools_node)
+builder.add_node("nudge", nudge_agent)
+builder.add_node("distill", distill_knowledge)
+
+builder.add_edge(START, "agent")
+builder.add_conditional_edges("agent", route_agent, ["tools", "nudge", "distill"])
 builder.add_edge("tools", "agent")
+builder.add_edge("nudge", "agent")
 builder.add_edge("distill", END)
 
 # ------------------------------------------------------------------------------
@@ -436,10 +470,22 @@ def _render_message(msg) -> None:
         content = msg.content
         if content:
             text = _vault_redact(content if isinstance(content, str) else str(content))
-            if tool_calls:
-                ui.thought_panel(text)
+            if "<thought>" in text and "</thought>" in text:
+                parts = text.split("</thought>")
+                thought_part = parts[0].replace("<thought>", "").strip()
+                ans_part = parts[1].strip() if len(parts) > 1 else ""
+                if thought_part:
+                    ui.thought_panel(thought_part)
+                if ans_part:
+                    if tool_calls:
+                        ui.thought_panel(ans_part)
+                    else:
+                        ui.final_answer_panel(ans_part)
             else:
-                ui.final_answer_panel(text)
+                if tool_calls:
+                    ui.thought_panel(text)
+                else:
+                    ui.final_answer_panel(text)
         for call in tool_calls:
             ui.tool_call_panel(call.get("name", "tool"), call.get("args") or {})
 
@@ -587,7 +633,14 @@ def run_repl(app, config):
         except Exception as e:
             # Don't kill the session over a single failed turn.
             logger.exception("Error while processing turn")
-            ui.error(f"{e}")
+            err_msg = str(e)
+            if "503" in err_msg and "Loading model" in err_msg:
+                ui.error("Local LLM model is still loading on server (503). Give the server a few seconds to load weights into VRAM, then try again.")
+            elif "500" in err_msg and ("parse error" in err_msg or "Failed to parse" in err_msg):
+                ui.error("The local LLM server encountered a context parse error (500).")
+                ui.info("Try typing /new to start a fresh, clean conversation thread.")
+            else:
+                ui.error(f"{e}")
             ui.info("The session is still active — try again or type 'quit' to exit.")
 
 
@@ -599,7 +652,8 @@ def main() -> None:
     if _VAULT_ENV_LOADED:
         ui.info(f"Vault: loaded {len(_VAULT_ENV_LOADED)} credential(s) into the environment.")
     ui.startup_tip(LLM_MODEL)
-    config = {"configurable": {"thread_id": "root_access_session_1"}}
+    session_id = f"session_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    config = {"configurable": {"thread_id": session_id}}
 
     try:
         if SQLITE_AVAILABLE:
