@@ -69,7 +69,7 @@ Edit the constants at the top of `langbot.py`:
 |----------|---------|---------|
 | `BASE_URL` | `http://127.0.0.1:8080/v1` | OpenAI-compatible LLM endpoint |
 | `LLM_MODEL` | `local-model` | Model name sent to the endpoint |
-| `SQLITE_DB_PATH` | `./agent_checkpoints.db` | Conversation checkpoint DB |
+| `SQLITE_DB_PATH` | `./memory/agent_checkpoints.db` | Conversation checkpoint DB |
 | `CHROMA_PERSIST_DIR` | `./agent_memory_chroma` | Long-term memory store |
 
 Environment variables:
