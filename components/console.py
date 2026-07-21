@@ -582,10 +582,12 @@ try:
     from rich.markdown import Markdown as _RichMarkdown
     from rich import box as _RichBox
     from rich.style import Style as _RichStyle
+    from rich.markup import escape as _escape_markup
     _RICH_CONSOLE = _RichConsole(highlight=False)
     _HAS_RICH = True
 except Exception:
     _HAS_RICH = False
+    _escape_markup = None
 
 # ── Panel border characters (fallback when Rich unavailable) ──
 _PANEL_CHARS = {
@@ -720,7 +722,7 @@ def thought_panel(content: str):
     """Render an intermediate agent reasoning message."""
     if not content or not content.strip():
         return
-    panel(title="\U0001f4ad Thought", content=content.strip(),
+    panel(title="🧠 Thought", content=content.strip(),
           border_style="magenta", render_md=True)
 
 
@@ -750,7 +752,10 @@ def tool_result_panel(name: str, content: str, is_error: bool = False):
         text = text[:_TOOL_RESULT_PREVIEW] + f"\n\n... [{full_len:,} total chars]"
     if not text.strip():
         text = "(no output)"
-    status = "\u2717" if is_error else "\u2713"
+    # Escape markup to prevent Rich from misinterpreting brackets
+    if _HAS_RICH and _escape_markup:
+        text = _escape_markup(text)
+    status = "✗" if is_error else "✓"
     panel(title=f"{status} {icon} {name}", content=text,
           border_style="red" if is_error else "blue")
 
