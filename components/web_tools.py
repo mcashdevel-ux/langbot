@@ -18,7 +18,7 @@ import requests
 
 from .engines import search_engine  # sibling module in the components package
 
-SCRATCH_DIR = os.environ.get("AGENT_SCRATCH_DIR", "/tmp/agent_scratch")
+SCRATCH_DIR = os.environ.get("AGENT_SCRATCH_DIR", "./memory/agent_scratch")
 os.makedirs(SCRATCH_DIR, exist_ok=True)
 
 SEARCH_SNIPPET_CHARS = 160     # per-result snippet shown inline to the model
@@ -41,17 +41,41 @@ def save_to_scratch(content: str, prefix: str = "doc") -> str:
     return sid
 
 
+def _valid_utf8_prefix_len(data: bytes) -> int:
+    """Return the length of the longest prefix of ``data`` that is valid UTF-8."""
+    try:
+        data.decode("utf-8")
+        return len(data)
+    except UnicodeDecodeError as e:
+        return e.start
+
+
 def read_scratch(scratch_id: str, offset: int = 0, length: int = 1500) -> str:
-    """Page through a previously saved search/fetch result."""
+    """Page through a previously saved search/fetch result.
+
+    Offsets and lengths are byte-based and stay consistent with the file's byte
+    size, so paging works for non-ASCII (multi-byte UTF-8) content. When a page
+    boundary lands in the middle of a multi-byte character, the read is extended
+    to include the whole character (rather than dropping it), so paging with the
+    returned ``end`` as the next ``offset`` reassembles the content losslessly.
+    """
     path = os.path.join(SCRATCH_DIR, f"{scratch_id}.txt")
     if not os.path.exists(path):
         return f"(no scratch entry found for id '{scratch_id}')"
-    with open(path, "r", encoding="utf-8") as f:
-        f.seek(max(0, offset))
-        chunk = f.read(length)
+    offset = max(0, offset)
     total = os.path.getsize(path)
-    end = offset + len(chunk)
+    with open(path, "rb") as f:
+        f.seek(offset)
+        raw = f.read(max(0, length))
+        # If we stopped mid-character (not at EOF), pull up to 3 more bytes to
+        # complete it — a UTF-8 char is at most 4 bytes — then keep only the
+        # complete-character prefix.
+        if raw and offset + len(raw) < total and _valid_utf8_prefix_len(raw) < len(raw):
+            raw += f.read(3)
+            raw = raw[:_valid_utf8_prefix_len(raw)]
+    end = offset + len(raw)
     more = end < total
+    chunk = raw.decode("utf-8", errors="ignore")
     tail = f"\n...(more available, call read_scratch with offset={end})" if more else ""
     return f"[scratch:{scratch_id} bytes {offset}-{end}/{total}]\n{chunk}{tail}"
 

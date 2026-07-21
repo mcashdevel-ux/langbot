@@ -25,6 +25,25 @@ def truncate(text: str, max_chars: int = MAX_OUTPUT_CHARS,
     return text
 
 
+def strip_code_fences(raw: str) -> str:
+    """Strip a leading/trailing Markdown code fence from a model reply.
+
+    Handles single-line fenced replies (e.g. ```["a"]```) without the
+    ``IndexError`` a naive ``split("\\n", 1)[1]`` would raise, as well as
+    fences carrying a language tag (```json). Returns the inner text, stripped.
+    """
+    text = raw.strip()
+    if not text.startswith("```"):
+        return text
+    # Drop the opening fence line (may include a language tag).
+    parts = text.split("\n", 1)
+    text = parts[1] if len(parts) == 2 else parts[0][3:]
+    text = text.strip()
+    if text.endswith("```"):
+        text = text[:-3]
+    return text.strip()
+
+
 @contextlib.contextmanager
 def suppress_native_output():
     """Silence *all* output — including from C extensions and child threads —

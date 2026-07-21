@@ -36,7 +36,7 @@ import chromadb
 from chromadb.config import Settings
 
 from components.web_tools import search_web as _search_web, fetch_url as _fetch_url, read_scratch as _read_scratch
-from components.utils import truncate, suppress_native_output
+from components.utils import truncate, suppress_native_output, strip_code_fences
 
 import components.console as ui
 from components.input import read_input, setup_readline
@@ -113,14 +113,18 @@ def _store_memory(text: str) -> str:
     return mem_id
 
 def _recall_memories(query: str, n: int = 3) -> list[str]:
+    count = memory_collection.count()
+    if count == 0:
+        # Chroma rejects n_results < 1, so guard the empty-store case explicitly.
+        return []
     query_vec = embeddings.embed_query(query)
     results = memory_collection.query(
         query_embeddings=[query_vec],
-        n_results=min(n, memory_collection.count()),
+        n_results=min(n, count),
     )
     if not results or not results["metadatas"] or not results["metadatas"][0]:
         return []
-    return [meta["text"] for meta in results["metadatas"][0]]
+    return [meta.get("text", "") for meta in results["metadatas"][0] if meta.get("text")]
 
 # ------------------------------------------------------------------------------
 # 3. Tools (original + memory)
@@ -275,14 +279,14 @@ Do not include explanations, markdown, or extra text.
 """
     try:
         raw = llm.invoke(distillation_prompt).content.strip()
-        # Remove possible markdown fences
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1]
-            if raw.endswith("```"):
-                raw = raw[:-3]
+        raw = strip_code_fences(raw)
         facts = json.loads(raw)
+        if not isinstance(facts, list):
+            logger.warning("Knowledge distillation skipped: model output was not a JSON array")
+            return state
         for fact in facts:
-            _store_memory(fact)
+            if isinstance(fact, str) and fact.strip():
+                _store_memory(fact)
             # Optional console feedback – quiet by default
     except json.JSONDecodeError as e:
         # Model returned something that wasn't a JSON array; distillation is a
@@ -427,7 +431,8 @@ def run_repl(app, config):
             ui.info("The session is still active — try again or type 'quit' to exit.")
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Console entrypoint: set up the REPL, compile the graph, and run it."""
     setup_readline()
     ui.banner("langbot", "unrestricted shell / file / web agent")
     ui.warning("This agent has UNRESTRICTED shell, file, and web access.")
@@ -447,3 +452,7 @@ if __name__ == "__main__":
             run_repl(app, config)
     finally:
         _vault_save()
+
+
+if __name__ == "__main__":
+    main()
