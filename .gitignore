@@ -34,3 +34,4 @@ agent_scratch/
 /tmp/agent_scratch/
 /memory/agent_checkpoints.db
 /memory/agent_checkpoints.db-*
+/others
