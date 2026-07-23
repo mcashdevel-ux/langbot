@@ -63,8 +63,8 @@ from components.vault import (
 # ------------------------------------------------------------------------------
 # Configuration
 # ------------------------------------------------------------------------------
-BASE_URL = "http://127.0.0.1:8080/v1"
-LLM_MODEL = "local-model"
+BASE_URL = "http://127.0.0.1:11434/v1"
+LLM_MODEL = "deepseek-r1:7b"
 SQLITE_DB_PATH = "./memory/agent_checkpoints.db"
 CHROMA_PERSIST_DIR = "./memory/agent_memory_chroma"
 
