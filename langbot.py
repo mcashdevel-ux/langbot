@@ -317,9 +317,9 @@ system_prompt = SystemMessage(content=(
     "You are a fully autonomous AI assistant with unrestricted shell, file, and web access, "
     "as well as a persistent, searchable long-term memory. You act proactively and execute multi-step tasks to completion.\n\n"
     "CRITICAL AUTONOMY RULES:\n"
-    "1. REASONING & CHAIN-OF-THOUGHT (CoT): Think step-by-step about what needs to be done. Formulate a plan and execute it using tools immediately.\n"
+    "1. REASONING & CHAIN-OF-THOUGHT (CoT): Always enclose your step-by-step thinking inside <thought>...</thought> tags before you act. Formulate a plan and then execute it using tools immediately.\n"
     "2. NEVER ASK FOR PERMISSION: Do NOT output phrases like 'Would you like me to proceed?', 'Should I fetch...', or 'Shall I run...'. If the user asks for a task (e.g. 'validate all secrets'), DO NOT describe how you would do it in text — ACTUALLY INVOKE THE TOOLS to execute it right now.\n"
-    "3. NO FAKE TOOL EXECUTION: Never write pseudo-code, fake JSON, or dummy curl commands in markdown text blocks. Call actual tools (`vault`, `execute_shell_command`, `search_web`, etc.) to get real results.\n"
+    "3. USE NATIVE TOOL CALLING ONLY: You have native tools available (e.g., `search_web`, `fetch_url`, `execute_shell_command`). DO NOT write python scripts to import these tools. DO NOT write dummy `curl` commands in text blocks. You must invoke the provided tools directly via your function calling interface.\n"
     "4. AUTOMATIC MULTI-STEP RETRY: If a tool call fails or returns empty/partial results, try alternative parameters, tools, or shell commands immediately in the same turn. Do not stop and hand control back to the user until the full objective is achieved.\n\n"
     "For editing files, prefer 'patch_file' over rewriting whole files. For background tasks, use 'task_start'. Use 'recall' to check long-term memory when relevant."
 ))
@@ -339,6 +339,11 @@ def distill_knowledge(state: MessagesState) -> MessagesState:
     """
     Extract important facts from the most recent user request and assistant response,
     and save them to long-term memory automatically.
+
+    Guard: only distil when the turn actually executed at least one tool call that
+    returned a result.  If the model only *described* what it would do (no tool
+    messages in this turn), there is nothing factual to extract — storing the
+    assistant's intentions as facts would poison the memory with hallucinations.
     """
     user_msgs = [m for m in state["messages"] if isinstance(m, HumanMessage)]
     ai_msgs = [m for m in state["messages"] if m.type == "ai" and m.content]
@@ -346,22 +351,48 @@ def distill_knowledge(state: MessagesState) -> MessagesState:
     if not user_msgs or not ai_msgs:
         return state
 
+    # ── Fix 1: only distil from turns where tools were actually invoked ──────
+    # Find the index of the last HumanMessage so we only inspect the current turn.
+    last_human_idx = max(
+        i for i, m in enumerate(state["messages"]) if isinstance(m, HumanMessage)
+    )
+    turn_msgs = state["messages"][last_human_idx:]
+    tool_results = [m for m in turn_msgs if getattr(m, "type", None) == "tool"]
+    if not tool_results:
+        logger.debug("Knowledge distillation skipped: no tool results in this turn.")
+        return state
+    # ─────────────────────────────────────────────────────────────────────────
+
     last_user = user_msgs[-1].content
     last_ai = ai_msgs[-1].content
 
+    # Build context from actual tool outputs so the distillation model has
+    # grounded evidence rather than the assistant's prose descriptions.
+    tool_context_lines = []
+    for m in tool_results:
+        name = getattr(m, "name", "tool")
+        content = m.content if isinstance(m.content, str) else str(m.content)
+        tool_context_lines.append(f"[{name}]: {content[:400]}")
+    tool_context = "\n".join(tool_context_lines)
+
     distillation_prompt = f"""
-You are a knowledge extraction module. Look at the following user request and assistant response.
-Extract any factual information that would be useful for a long-term memory system.
-These could be:
-- User preferences (e.g., "the user likes Python", "they prefer DuckDuckGo")
-- Important facts learned (e.g., "project located at ~/code/myapp", "the weather API key is...")
-- Decisions or conclusions (e.g., "decided to use SQLite for storage")
-- Context that will help future interactions (e.g., "the user is working on a web scraping project")
+You are a knowledge extraction module. Look at the following user request, the tool
+results that were actually returned this turn, and the assistant's final response.
+Extract only factual information that is GROUNDED IN THE TOOL RESULTS — do not infer
+or store anything the assistant merely described doing without evidence in the tool output.
+Useful facts include:
+- User preferences (e.g., "the user prefers DuckDuckGo")
+- Confirmed facts from tool output (e.g., "project located at ~/code/myapp")
+- Decisions or conclusions that are supported by evidence
+- Context helpful for future interactions
 
 User request: {last_user}
+Tool results this turn:
+{tool_context}
 Assistant response: {last_ai}
 
-Return ONLY a JSON array of strings, each a standalone factual statement. If nothing important, return an empty array [].
+Return ONLY a JSON array of strings, each a standalone factual statement grounded in
+the tool results above. If nothing is clearly supported by evidence, return [].
 Do not include explanations, markdown, or extra text.
 """
     try:
@@ -400,15 +431,8 @@ def tools_node(state: MessagesState):
             msg.content = _vault_redact(msg.content)
     return result
 
-def nudge_agent(state: MessagesState):
-    """Nudge node: if the model asked for permission instead of running tools,
-    remind it to execute autonomously without stopping."""
-    nudge_msg = SystemMessage(content=(
-        "[AUTONOMOUS AGENT DIRECTIVE]: Do not ask for permission or confirmation. "
-        "Formulate a plan and invoke the required tool calls immediately to complete the user request."
-    ))
-    return {"messages": [nudge_msg]}
-
+# ── Fix 2: failure-mode detection phrases ────────────────────────────────────
+# Phrases that indicate the model is asking for permission instead of acting.
 PERMISSION_PHRASES = (
     "would you like me to",
     "would you like to proceed",
@@ -419,7 +443,73 @@ PERMISSION_PHRASES = (
     "let me know if you would like",
     "if you would like me to",
     "would you like to",
+    "would you like me",
+    "please confirm",
+    "please let me know",
+    "do you want to proceed",
 )
+
+# Patterns that indicate the model is hallucinating tool calls as code blocks
+# instead of invoking the actual function-calling interface.
+TOOL_AVOIDANCE_PATTERNS = (
+    "import search_web",
+    "import fetch_url",
+    "import execute_shell",
+    "search_web.search(",
+    "fetch_url(",
+    "requests.get(",          # writing raw HTTP calls instead of using tools
+    "requests.post(",
+    "subprocess.run(",         # using shell inside a code block instead of the tool
+    "```python\nimport",       # code fence opening with an import
+    "```bash\ncurl",           # writing curl in a bash block instead of the tool
+    "```\ncurl",
+    "curl -h ",
+    "curl -o ",
+    "{{vault_get",            # hallucinated template syntax
+    "{{vault",
+)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_NUDGE_PERMISSION = (
+    "[AUTONOMOUS AGENT DIRECTIVE]: You just asked for permission or confirmation instead of acting. "
+    "Do NOT ask the user whether to proceed. "
+    "Invoke the required tool calls RIGHT NOW to complete the user request."
+)
+
+_NUDGE_CODE_BLOCK = (
+    "[AUTONOMOUS AGENT DIRECTIVE]: You wrote code or curl commands in a text block instead of "
+    "calling your native tools. You have tools available — search_web, fetch_url, "
+    "execute_shell_command, vault, etc. DO NOT write Python or bash blocks that pretend to use "
+    "these tools. Call them DIRECTLY via the function-calling interface RIGHT NOW."
+)
+
+
+def _ai_turns_since_human(messages) -> int:
+    """Count consecutive AI messages back to (not including) the last HumanMessage."""
+    count = 0
+    for m in reversed(messages):
+        if isinstance(m, HumanMessage):
+            break
+        if getattr(m, "type", None) == "ai":
+            count += 1
+    return count
+
+
+def nudge_agent(state: MessagesState):
+    """Nudge node: inject a targeted correction when the model either asked for
+    permission or hallucinated tool calls as code blocks instead of invoking them."""
+    last_msg = state["messages"][-1]
+    content = getattr(last_msg, "content", "") or ""
+    content_lower = content.lower()
+
+    # Pick the nudge message most appropriate to the detected failure mode.
+    if any(pat in content_lower for pat in TOOL_AVOIDANCE_PATTERNS):
+        nudge_text = _NUDGE_CODE_BLOCK
+    else:
+        nudge_text = _NUDGE_PERMISSION
+
+    return {"messages": [SystemMessage(content=nudge_text)]}
+
 
 def route_agent(state: MessagesState):
     last_msg = state["messages"][-1]
@@ -427,15 +517,17 @@ def route_agent(state: MessagesState):
         return "tools"
 
     if last_msg.type == "ai" and isinstance(getattr(last_msg, "content", None), str):
-        content_lower = last_msg.content.lower()
-        if any(phrase in content_lower for phrase in PERMISSION_PHRASES):
-            ai_since_human = 0
-            for m in reversed(state["messages"]):
-                if isinstance(m, HumanMessage):
-                    break
-                if getattr(m, "type", None) == "ai":
-                    ai_since_human += 1
-            if ai_since_human < 3:
+        content = last_msg.content
+        content_lower = content.lower()
+
+        needs_nudge = (
+            any(phrase in content_lower for phrase in PERMISSION_PHRASES)
+            or any(pat in content_lower for pat in TOOL_AVOIDANCE_PATTERNS)
+        )
+
+        if needs_nudge:
+            # Allow up to 5 re-tries per human turn before giving up.
+            if _ai_turns_since_human(state["messages"]) < 5:
                 return "nudge"
 
     return "distill"
