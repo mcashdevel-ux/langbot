@@ -25,6 +25,8 @@ from urllib.parse import urlencode
 import httpx
 import requests
 
+from .config import config
+
 # ---------------------------------------------------------------------------
 # Bootstrap: initialize SearXNG settings + engine loader once
 # ---------------------------------------------------------------------------
@@ -48,6 +50,9 @@ def _ensure_searx_initialized():
         os.path.expanduser("~/searxng-src"),
         "/usr/local/searxng/searxng-src",
     ]
+    configured_src = config.get("web.searxng_source_dir", "")
+    if configured_src:
+        candidate_paths.insert(0, os.path.expanduser(configured_src))
     searx_src = None
     for p in candidate_paths:
         if os.path.isdir(os.path.join(p, "searx")):
@@ -72,7 +77,8 @@ def _ensure_searx_initialized():
         sys.path.insert(0, searx_src)
     
     # Point to our settings
-    settings_path = os.environ.get("SEARXNG_SETTINGS_PATH", "/etc/searxng/settings.yml")
+    settings_path = config.get("web.searxng_settings_path", "/etc/searxng/settings.yml",
+                               env="SEARXNG_SETTINGS_PATH")
     if not os.path.exists(settings_path):
         # Fallback: use the default settings from source
         settings_path = os.path.join(searx_src, "searx", "settings.yml")

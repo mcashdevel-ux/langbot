@@ -39,6 +39,7 @@ from typing import Dict, Optional, List, Any, Tuple
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from .config import config
 from .utils import atomic_write_json
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-VAULT_DIR = Path("memory/vault")
+VAULT_DIR = Path(config.get("paths.vault_dir", "memory/vault"))
 MASTERKEY_FILE = VAULT_DIR / ".masterkey"
 CREDENTIALS_FILE = VAULT_DIR / "credentials.json"
 METADATA_FILE = VAULT_DIR / "metadata.json"

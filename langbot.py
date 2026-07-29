@@ -9,8 +9,8 @@ os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import subprocess
-import json
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from langchain_huggingface import HuggingFaceEmbeddings
 from langgraph.graph import StateGraph, START, END, MessagesState
 from langgraph.prebuilt import ToolNode, tools_condition
 
@@ -32,11 +31,18 @@ except ModuleNotFoundError:
     SQLITE_AVAILABLE = False
     print("Warning: langgraph-checkpoint-sqlite not installed – conversation history will not persist.")
 
-import chromadb
-from chromadb.config import Settings
-
-from components.web_tools import search_web as _search_web, fetch_url as _fetch_url, read_scratch as _read_scratch
-from components.utils import truncate, suppress_native_output, strip_code_fences
+from components.web_tools import search_web as _search_web, fetch_url as _fetch_url
+from components.scratch import read_scratch as _read_scratch
+from components.utils import truncate
+# Aliased: `config` is the per-thread graph config in this module's REPL helpers.
+from components.config import CONFIG_ENV_VAR, CONFIG_FILENAME, config as app_config
+from components.memory_store import (
+    count as _memory_count,
+    get_embeddings as _load_embeddings,
+    recall_memories as _recall_memories,
+    store_memory as _store_memory,
+)
+from components.memory_worker import DistillJob, MemoryWorker
 from components.file_ops import (
     read_file as _read_file,
     write_file as _write_file,
@@ -50,6 +56,15 @@ from components.code_search import (
     glob_list as _glob_list,
 )
 from components import tasks as _tasks
+from components import (
+    code_search as _code_search,
+    file_ops as _file_ops,
+    memory_store as _memory_store,
+    memory_worker as _memory_worker_mod,
+    scratch as _scratch,
+    web_tools as _web_tools,
+)
+from components.routing import nudge_agent, route_agent
 
 import components.console as ui
 from components.input import read_input, setup_readline
@@ -61,12 +76,14 @@ from components.vault import (
 )
 
 # ------------------------------------------------------------------------------
-# Configuration
+# Configuration — every value below has a working default, so ./langbot.config.json
+# (see components/config.py for the search order) is entirely optional.
 # ------------------------------------------------------------------------------
-BASE_URL = "http://127.0.0.1:11434/v1"
-LLM_MODEL = "deepseek-r1:7b"
-SQLITE_DB_PATH = "./memory/agent_checkpoints.db"
-CHROMA_PERSIST_DIR = "./memory/agent_memory_chroma"
+BASE_URL = app_config.get("llm.base_url", "http://127.0.0.1:8080/v1")
+LLM_MODEL = app_config.get("llm.model", "local-model")
+LLM_TEMPERATURE = app_config.get("llm.temperature", 0.1)
+LLM_MAX_RETRIES = app_config.get("llm.max_retries", 10)
+SQLITE_DB_PATH = app_config.get("paths.checkpoint_db", "./memory/agent_checkpoints.db")
 
 # ------------------------------------------------------------------------------
 # 0. Credential Vault — load stored secrets into the environment before the LLM
@@ -77,67 +94,22 @@ _VAULT_ENV_LOADED = _vault_bootstrap()
 # ------------------------------------------------------------------------------
 # 1. LLM & Embeddings
 # ------------------------------------------------------------------------------
-llm = ChatOpenAI(model=LLM_MODEL, base_url=BASE_URL, api_key="not-needed", temperature=0.1)
-
-def _load_embeddings():
-    """Construct the embedding model without leaking its loading progress bars
-    onto the console. The heavy transformers/tqdm output is written to the raw
-    stderr fd, so we mute it at the fd level while the weights load."""
-    ui.info("Loading embedding model...")
-    try:
-        import transformers  # noqa: WPS433 (optional, only to quiet it)
-
-        transformers.logging.set_verbosity_error()
-        transformers.logging.disable_progress_bar()
-    except Exception:
-        pass
-    with suppress_native_output():
-        model = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            model_kwargs={'device': 'cpu'},
-            encode_kwargs={'normalize_embeddings': True},
-        )
-    ui.success("Embedding model ready.")
-    return model
-
-
-embeddings = _load_embeddings()
-
-# ------------------------------------------------------------------------------
-# 2. Semantic Memory Store
-# ------------------------------------------------------------------------------
-chroma_client = chromadb.PersistentClient(
-    path=CHROMA_PERSIST_DIR,
-    settings=Settings(anonymized_telemetry=False),
-)
-memory_collection = chroma_client.get_or_create_collection(
-    name="agent_longterm_memory",
-    metadata={"hnsw:space": "cosine"},
+llm = ChatOpenAI(
+    model=LLM_MODEL,
+    base_url=BASE_URL,
+    api_key="not-needed",
+    temperature=LLM_TEMPERATURE,
+    max_retries=LLM_MAX_RETRIES,
 )
 
-def _store_memory(text: str) -> str:
-    mem_id = str(uuid.uuid4())
-    vector = embeddings.embed_query(text)
-    memory_collection.add(
-        ids=[mem_id],
-        embeddings=[vector],
-        metadatas=[{"text": text, "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}],
-    )
-    return mem_id
+# Warm the embedding model up front rather than on the first remember/recall,
+# so its (quiet, multi-second) load happens at startup instead of mid-turn.
+_load_embeddings()
 
-def _recall_memories(query: str, n: int = 3) -> list[str]:
-    count = memory_collection.count()
-    if count == 0:
-        # Chroma rejects n_results < 1, so guard the empty-store case explicitly.
-        return []
-    query_vec = embeddings.embed_query(query)
-    results = memory_collection.query(
-        query_embeddings=[query_vec],
-        n_results=min(n, count),
-    )
-    if not results or not results["metadatas"] or not results["metadatas"][0]:
-        return []
-    return [meta.get("text", "") for meta in results["metadatas"][0] if meta.get("text")]
+# ------------------------------------------------------------------------------
+# 2. Semantic Memory Store (components/memory_store.py) + background distiller
+# ------------------------------------------------------------------------------
+_memory_worker = MemoryWorker(llm=llm)
 
 # ------------------------------------------------------------------------------
 # 3. Tools (original + memory)
@@ -189,7 +161,11 @@ def execute_shell_command(command: str, cwd: str = "", timeout: int = 120) -> st
 
 @tool
 def read_any_file(file_path: str) -> str:
-    """Read any text file. Binary files are reported by size, not dumped."""
+    """Read any text file. Binary files are reported by size, not dumped.
+
+    Large files are truncated inline; call 'read_scratch' with the returned id
+    to see the rest.
+    """
     return _read_file(file_path)
 
 @tool
@@ -223,12 +199,18 @@ def git_diff(file_path: str = ".", cached: bool = False) -> str:
 
 @tool
 def find_in_files(pattern: str, path: str = ".") -> str:
-    """Search for a text pattern across source/text files (recursive)."""
+    """Search for a text pattern across source/text files (recursive).
+
+    Result sets over 20 matches are paged via 'read_scratch'.
+    """
     return _find_in_files(pattern, path)
 
 @tool
 def read_many_files(pattern: str, max_files: int = 20) -> str:
-    """Read multiple files matching a glob pattern (e.g. 'src/**/*.py')."""
+    """Read multiple files matching a glob pattern (e.g. 'src/**/*.py').
+
+    Large result sets are truncated inline and paged via 'read_scratch'.
+    """
     return _read_many_files(pattern, max_files=max_files)
 
 @tool
@@ -309,19 +291,13 @@ llm_with_tools = llm.bind_tools(tools)
 # ------------------------------------------------------------------------------
 system_prompt = SystemMessage(content=(
     "You are a fully autonomous AI assistant with unrestricted shell, file, and web access, "
-    "as well as a persistent, searchable long-term memory. You act proactively: if a task "
-    "can be done safely, do it without asking. Only request explicit user confirmation for "
-    "potentially destructive operations.\n\n"
-    "When using tools: if a call does not yield the desired result, immediately try alternative "
-    "parameters, engines, or approaches. Do not stop to ask the user for guidance.\n\n"
-    "You have long-term memory tools ('remember' and 'recall'), but the system also automatically "
-    "distills important facts from our conversation. Use 'recall' to retrieve relevant past "
-    "information before tackling new tasks.\n\n"
-    "For editing files, prefer 'patch_file' (surgical find/replace) over rewriting whole files, "
-    "and use 'find_in_files'/'read_many_files'/'glob_list' to navigate code. Run long-lived "
-    "processes (servers, watchers) with 'task_start' and manage them via task_list/task_output/"
-    "task_kill instead of blocking shell calls.\n\n"
-    "Be concise but thorough – give complete answers, not play‑by‑play commentary."
+    "as well as a persistent, searchable long-term memory. You act proactively and execute multi-step tasks to completion.\n\n"
+    "CRITICAL AUTONOMY RULES:\n"
+    "1. REASONING & CHAIN-OF-THOUGHT (CoT): Always enclose your step-by-step thinking inside <thought>...</thought> tags before you act. Formulate a plan and then execute it using tools immediately.\n"
+    "2. NEVER ASK FOR PERMISSION: Do NOT output phrases like 'Would you like me to proceed?', 'Should I fetch...', or 'Shall I run...'. If the user asks for a task (e.g. 'validate all secrets'), DO NOT describe how you would do it in text — ACTUALLY INVOKE THE TOOLS to execute it right now.\n"
+    "3. USE NATIVE TOOL CALLING ONLY: You have native tools available (e.g., `search_web`, `fetch_url`, `execute_shell_command`). DO NOT write python scripts to import these tools. DO NOT write dummy `curl` commands in text blocks. You must invoke the provided tools directly via your function calling interface.\n"
+    "4. AUTOMATIC MULTI-STEP RETRY: If a tool call fails or returns empty/partial results, try alternative parameters, tools, or shell commands immediately in the same turn. Do not stop and hand control back to the user until the full objective is achieved.\n\n"
+    "For editing files, prefer 'patch_file' over rewriting whole files. For background tasks, use 'task_start'. Use 'recall' to check long-term memory when relevant."
 ))
 
 # ------------------------------------------------------------------------------
@@ -337,8 +313,15 @@ def agent(state: MessagesState):
 # ------------------------------------------------------------------------------
 def distill_knowledge(state: MessagesState) -> MessagesState:
     """
-    Extract important facts from the most recent user request and assistant response,
-    and save them to long-term memory automatically.
+    Hand the turn's user request, tool results, and answer to the background
+    memory worker, which extracts durable facts and stores them off the graph's
+    critical path.
+
+    Guard: only distil when the turn actually executed at least one tool call
+    that returned a result. If the model only *described* what it would do (no
+    tool messages in this turn), there is nothing factual to extract — storing
+    the assistant's intentions as facts would poison the memory with
+    hallucinations.
     """
     user_msgs = [m for m in state["messages"] if isinstance(m, HumanMessage)]
     ai_msgs = [m for m in state["messages"] if m.type == "ai" and m.content]
@@ -346,46 +329,34 @@ def distill_knowledge(state: MessagesState) -> MessagesState:
     if not user_msgs or not ai_msgs:
         return state
 
-    last_user = user_msgs[-1].content
-    last_ai = ai_msgs[-1].content
+    # Find the index of the last HumanMessage so we only inspect the current turn.
+    last_human_idx = max(
+        i for i, m in enumerate(state["messages"]) if isinstance(m, HumanMessage)
+    )
+    turn_msgs = state["messages"][last_human_idx:]
+    tool_results = [m for m in turn_msgs if getattr(m, "type", None) == "tool"]
+    if not tool_results:
+        logger.debug("Knowledge distillation skipped: no tool results in this turn.")
+        return state
 
-    distillation_prompt = f"""
-You are a knowledge extraction module. Look at the following user request and assistant response.
-Extract any factual information that would be useful for a long-term memory system.
-These could be:
-- User preferences (e.g., "the user likes Python", "they prefer DuckDuckGo")
-- Important facts learned (e.g., "project located at ~/code/myapp", "the weather API key is...")
-- Decisions or conclusions (e.g., "decided to use SQLite for storage")
-- Context that will help future interactions (e.g., "the user is working on a web scraping project")
+    # Build context from actual tool outputs so the distillation model has
+    # grounded evidence rather than the assistant's prose descriptions.
+    tool_context = "\n".join(
+        f"[{getattr(m, 'name', 'tool')}]: "
+        f"{(m.content if isinstance(m.content, str) else str(m.content))[:400]}"
+        for m in tool_results
+    )
 
-User request: {last_user}
-Assistant response: {last_ai}
-
-Return ONLY a JSON array of strings, each a standalone factual statement. If nothing important, return an empty array [].
-Do not include explanations, markdown, or extra text.
-"""
-    try:
-        raw = llm.invoke(distillation_prompt).content.strip()
-        raw = strip_code_fences(raw)
-        facts = json.loads(raw)
-        if not isinstance(facts, list):
-            logger.warning("Knowledge distillation skipped: model output was not a JSON array")
-            return state
-        for fact in facts:
-            if isinstance(fact, str) and fact.strip():
-                _store_memory(fact)
-            # Optional console feedback – quiet by default
-    except json.JSONDecodeError as e:
-        # Model returned something that wasn't a JSON array; distillation is a
-        # bonus, so we don't break the main loop — but we don't hide it either.
-        logger.warning("Knowledge distillation skipped: could not parse model output as JSON: %s", e)
-    except Exception as e:
-        logger.warning("Knowledge distillation failed: %s", e, exc_info=True)
-
+    _memory_worker.enqueue(DistillJob(
+        user_text=user_msgs[-1].content,
+        ai_text=ai_msgs[-1].content,
+        tool_context=tool_context,
+        enqueued_at=time.time(),
+    ))
     return state
 
 # ------------------------------------------------------------------------------
-# 7. Build Graph with Distillation
+# 7. Build Graph with Distillation & Autonomous Guardrail
 # ------------------------------------------------------------------------------
 _tool_node = ToolNode(tools)
 
@@ -403,19 +374,13 @@ def tools_node(state: MessagesState):
 builder = StateGraph(MessagesState)
 builder.add_node("agent", agent)
 builder.add_node("tools", tools_node)
+builder.add_node("nudge", nudge_agent)
 builder.add_node("distill", distill_knowledge)
 
 builder.add_edge(START, "agent")
-
-# After agent: if there are tool calls -> tools, else -> distill
-def route_agent(state: MessagesState):
-    last_msg = state["messages"][-1]
-    if last_msg.type == "ai" and hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-        return "tools"
-    return "distill"
-
-builder.add_conditional_edges("agent", route_agent, ["tools", "distill"])
+builder.add_conditional_edges("agent", route_agent, ["tools", "nudge", "distill"])
 builder.add_edge("tools", "agent")
+builder.add_edge("nudge", "agent")
 builder.add_edge("distill", END)
 
 # ------------------------------------------------------------------------------
@@ -436,10 +401,22 @@ def _render_message(msg) -> None:
         content = msg.content
         if content:
             text = _vault_redact(content if isinstance(content, str) else str(content))
-            if tool_calls:
-                ui.thought_panel(text)
+            if "<thought>" in text and "</thought>" in text:
+                parts = text.split("</thought>")
+                thought_part = parts[0].replace("<thought>", "").strip()
+                ans_part = parts[1].strip() if len(parts) > 1 else ""
+                if thought_part:
+                    ui.thought_panel(thought_part)
+                if ans_part:
+                    if tool_calls:
+                        ui.thought_panel(ans_part)
+                    else:
+                        ui.final_answer_panel(ans_part)
             else:
-                ui.final_answer_panel(text)
+                if tool_calls:
+                    ui.thought_panel(text)
+                else:
+                    ui.final_answer_panel(text)
         for call in tool_calls:
             ui.tool_call_panel(call.get("name", "tool"), call.get("args") or {})
 
@@ -458,10 +435,18 @@ def _stream_turn(app, config, user_input: str) -> None:
     end). A spinner covers the wait before the first panel is emitted. The
     ``distill`` node re-emits the whole state, so we only render output from the
     ``agent`` and ``tools`` nodes.
+
+    One human turn yields at most one final-answer panel: a second no-tool-call
+    AI message is a duplicate (see routing.route_agent's guard) and is dropped
+    instead of rendered. At DEBUG level every chunk's (node, message types) is
+    logged so a duplicate can be traced back to its source — a second ``agent``
+    invocation with no ``tools``/``nudge`` message in between points at the
+    graph, whereas two AI messages in one update points at the LLM server.
     """
     spinner = ui.GradientSpinner("Thinking...")
     spinner.start()
     spinner_running = True
+    answered = False
     try:
         for chunk in app.stream(
             {"messages": [HumanMessage(content=user_input)]},
@@ -469,13 +454,30 @@ def _stream_turn(app, config, user_input: str) -> None:
             stream_mode="updates",
         ):
             for node, update in chunk.items():
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "stream chunk: node=%s messages=%s", node,
+                        [getattr(m, "type", None) for m in (update or {}).get("messages", [])],
+                    )
                 if node not in ("agent", "tools") or not update:
                     continue
                 for msg in update.get("messages", []):
+                    is_final_answer = (
+                        getattr(msg, "type", None) == "ai"
+                        and msg.content
+                        and not (getattr(msg, "tool_calls", None) or [])
+                    )
+                    if is_final_answer and answered:
+                        logger.warning(
+                            "dropping a duplicate final answer for this turn (preview: %r)",
+                            str(msg.content)[:120],
+                        )
+                        continue
                     if spinner_running:
                         spinner.stop()
                         spinner_running = False
                     _render_message(msg)
+                    answered = answered or bool(is_final_answer)
     finally:
         if spinner_running:
             spinner.stop()
@@ -487,6 +489,7 @@ _SLASH_HELP = [
     ("/new, /clear", "Start a fresh conversation (new memory thread)"),
     ("/info", "Show model, tool count, thread, memory size"),
     ("/health", "Show checkpointer, memory, vault, and task status"),
+    ("/config", "Show the active config file (or that defaults are in use)"),
     ("/ls [dir]", "List files in a directory"),
     ("/knowledge <q>", "Search long-term memory"),
     ("/save <fact>", "Store a fact in long-term memory"),
@@ -515,16 +518,36 @@ def _handle_slash(text: str, config: dict) -> bool:
         config["configurable"]["thread_id"] = new_id
         ui.success(f"Started a fresh conversation (thread {new_id}).")
         return False
+    if cmd == "config":
+        ui.kv("config file", app_config.describe())
+        if not app_config.loaded:
+            ui.info(f"Create ./{CONFIG_FILENAME} (or set ${CONFIG_ENV_VAR}) to override "
+                    f"defaults; see {CONFIG_FILENAME}.example.")
+        ui.kv("llm", f"{LLM_MODEL} @ {BASE_URL} (temp {LLM_TEMPERATURE})")
+        ui.kv("checkpoint db", SQLITE_DB_PATH)
+        ui.kv("memory store", _memory_store.CHROMA_PERSIST_DIR)
+        ui.kv("scratch dir", _scratch.SCRATCH_DIR)
+        ui.kv("tasks dir", _tasks.TASKS_DIR)
+        ui.kv("inline caps", f"file {_file_ops.READ_INLINE_CHARS}, "
+                             f"grep {_code_search.GREP_INLINE_LINES} lines, "
+                             f"fetch {_web_tools.FETCH_INLINE_CHARS}")
+        ui.kv("memory worker", f"queue {_memory_worker_mod.MAX_QUEUE_SIZE}, "
+                               f"batch {_memory_worker_mod.MAX_BATCH}")
+        return False
     if cmd == "info":
         ui.kv("model", LLM_MODEL)
+        ui.kv("config file", app_config.describe())
         ui.kv("tools", str(len(tools)))
         ui.kv("thread_id", config["configurable"]["thread_id"])
-        ui.kv("memories", str(memory_collection.count()))
+        ui.kv("memories", str(_memory_count()))
+        ui.kv("memory queue depth", str(_memory_worker.qsize()))
         ui.kv("checkpointer", "sqlite" if SQLITE_AVAILABLE else "memory")
         return False
     if cmd == "health":
         ui.kv("checkpointer", "sqlite" if SQLITE_AVAILABLE else "memory")
-        ui.kv("memories", str(memory_collection.count()))
+        ui.kv("memories", str(_memory_count()))
+        ui.kv("memory queue depth", str(_memory_worker.qsize()))
+        ui.kv("memory jobs dropped", str(_memory_worker.dropped_count()))
         ui.kv("vault creds", str(len(_VAULT_ENV_LOADED)))
         ui.kv("bg tasks", str(len(_tasks.manager.list())))
         return False
@@ -587,7 +610,14 @@ def run_repl(app, config):
         except Exception as e:
             # Don't kill the session over a single failed turn.
             logger.exception("Error while processing turn")
-            ui.error(f"{e}")
+            err_msg = str(e)
+            if "503" in err_msg and "Loading model" in err_msg:
+                ui.error("Local LLM model is still loading on server (503). Give the server a few seconds to load weights into VRAM, then try again.")
+            elif "500" in err_msg and ("parse error" in err_msg or "Failed to parse" in err_msg):
+                ui.error("The local LLM server encountered a context parse error (500).")
+                ui.info("Try typing /new to start a fresh, clean conversation thread.")
+            else:
+                ui.error(f"{e}")
             ui.info("The session is still active — try again or type 'quit' to exit.")
 
 
@@ -599,7 +629,8 @@ def main() -> None:
     if _VAULT_ENV_LOADED:
         ui.info(f"Vault: loaded {len(_VAULT_ENV_LOADED)} credential(s) into the environment.")
     ui.startup_tip(LLM_MODEL)
-    config = {"configurable": {"thread_id": "root_access_session_1"}}
+    session_id = f"session_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    config = {"configurable": {"thread_id": session_id}}
 
     try:
         if SQLITE_AVAILABLE:
@@ -611,6 +642,7 @@ def main() -> None:
             app = builder.compile(checkpointer=checkpointer)
             run_repl(app, config)
     finally:
+        _memory_worker.shutdown(timeout=10.0)
         _vault_save()
 
 
