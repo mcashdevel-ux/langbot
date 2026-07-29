@@ -9,6 +9,10 @@ long-term memory (Chroma + sentence-transformers).
 > is prompted to act without asking. Only run it in a trusted, single-user, sandboxed
 > environment. See "Security notes" below.
 
+> 📄 **Proprietary software.** All rights reserved — see [`LICENSE`](./LICENSE). Use requires
+> written permission from the copyright holder. Contributions are welcome under the terms in
+> [`CONTRIBUTING.md`](./CONTRIBUTING.md).
+
 ## Features
 
 - **Autonomous agent loop** (`langbot.py`) — LangGraph `StateGraph` with an agent node, a
@@ -169,6 +173,9 @@ components/
   console.py            # terminal UI helpers used by the REPL
   utils.py              # shared helpers (atomic JSON writes, truncation)
 CODE_REVIEW.md          # review of the initial commit with known issues + fixes
+MEMORY_POLICY.md        # where persistent state may live (./memory/ only)
+CONTRIBUTING.md         # how to contribute + where help is wanted
+LICENSE                 # proprietary license
 ```
 
 ## Known issues
@@ -176,3 +183,16 @@ CODE_REVIEW.md          # review of the initial commit with known issues + fixes
 See [`CODE_REVIEW.md`](./CODE_REVIEW.md) for the original review. Several items have since
 been addressed (console 3.12 import break, vault AES-GCM migration + `0600` perms, active
 output redaction, `read_scratch` handling).
+
+## Contributing
+
+Contributions are welcome — see [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the development
+setup, ground rules, and the areas where help is most wanted (new tools, SearXNG engine
+adapters, memory quality, local-model prompt tuning, terminal UX, sandboxing, docs and
+tests). Opening a pull request means agreeing to the contribution terms in the license.
+
+## License
+
+Proprietary — Copyright (c) 2026 mcashdevel-ux, all rights reserved. See
+[`LICENSE`](./LICENSE); use outside a written agreement with the copyright holder is not
+permitted. Third-party dependencies remain under their own licenses.
