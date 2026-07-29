@@ -38,3 +38,6 @@ agent_scratch/
 /memory/agent_checkpoints.db
 /memory/agent_checkpoints.db-*
 /others
+
+# Others
+*.swp
