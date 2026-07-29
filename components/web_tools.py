@@ -9,17 +9,13 @@ This is the key lever for keeping a small context window usable with
 search/browse tasks: full pages never get force-fed into the chat history.
 """
 
-import os
 import re
 import json
 import time
-import uuid
 import requests
 
 from .engines import search_engine  # sibling module in the components package
-
-SCRATCH_DIR = os.environ.get("AGENT_SCRATCH_DIR", "./memory/agent_scratch")
-os.makedirs(SCRATCH_DIR, exist_ok=True)
+from .scratch import save_to_scratch, read_scratch  # noqa: F401 (re-exported)
 
 SEARCH_SNIPPET_CHARS = 160     # per-result snippet shown inline to the model
 SEARCH_MAX_RESULTS = 5         # hard cap, regardless of what the model asks for
@@ -27,57 +23,6 @@ FETCH_INLINE_CHARS = 1800      # how much of a fetched page goes inline
 FETCH_SAVE_CHARS = 20000       # how much of a fetched page we keep on disk at all
 JINA_TIMEOUT = 25
 JINA_RETRY_ON_429 = 1          # anonymous Jina reader is rate-limited; one retry
-
-
-def _new_scratch_id(prefix: str) -> str:
-    return f"{prefix}_{uuid.uuid4().hex[:8]}"
-
-
-def save_to_scratch(content: str, prefix: str = "doc") -> str:
-    sid = _new_scratch_id(prefix)
-    path = os.path.join(SCRATCH_DIR, f"{sid}.txt")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content[:FETCH_SAVE_CHARS])
-    return sid
-
-
-def _valid_utf8_prefix_len(data: bytes) -> int:
-    """Return the length of the longest prefix of ``data`` that is valid UTF-8."""
-    try:
-        data.decode("utf-8")
-        return len(data)
-    except UnicodeDecodeError as e:
-        return e.start
-
-
-def read_scratch(scratch_id: str, offset: int = 0, length: int = 1500) -> str:
-    """Page through a previously saved search/fetch result.
-
-    Offsets and lengths are byte-based and stay consistent with the file's byte
-    size, so paging works for non-ASCII (multi-byte UTF-8) content. When a page
-    boundary lands in the middle of a multi-byte character, the read is extended
-    to include the whole character (rather than dropping it), so paging with the
-    returned ``end`` as the next ``offset`` reassembles the content losslessly.
-    """
-    path = os.path.join(SCRATCH_DIR, f"{scratch_id}.txt")
-    if not os.path.exists(path):
-        return f"(no scratch entry found for id '{scratch_id}')"
-    offset = max(0, offset)
-    total = os.path.getsize(path)
-    with open(path, "rb") as f:
-        f.seek(offset)
-        raw = f.read(max(0, length))
-        # If we stopped mid-character (not at EOF), pull up to 3 more bytes to
-        # complete it — a UTF-8 char is at most 4 bytes — then keep only the
-        # complete-character prefix.
-        if raw and offset + len(raw) < total and _valid_utf8_prefix_len(raw) < len(raw):
-            raw += f.read(3)
-            raw = raw[:_valid_utf8_prefix_len(raw)]
-    end = offset + len(raw)
-    more = end < total
-    chunk = raw.decode("utf-8", errors="ignore")
-    tail = f"\n...(more available, call read_scratch with offset={end})" if more else ""
-    return f"[scratch:{scratch_id} bytes {offset}-{end}/{total}]\n{chunk}{tail}"
 
 
 def search_web(query: str, engine: str = "duckduckgo", max_results: int = 5) -> str:
@@ -107,7 +52,11 @@ def search_web(query: str, engine: str = "duckduckgo", max_results: int = 5) -> 
             return f"search error ({engine}): {last_error}"
         return f"no results found for: {query}"
 
-    sid = save_to_scratch(json.dumps(results, indent=2, ensure_ascii=False), prefix="search")
+    sid = save_to_scratch(
+        json.dumps(results, indent=2, ensure_ascii=False),
+        prefix="search",
+        max_bytes=FETCH_SAVE_CHARS,
+    )
 
     lines = [f"Search results for '{query}' via {used_engine} (full data at scratch:{sid}):"]
     for i, r in enumerate(results, 1):
@@ -147,7 +96,7 @@ def fetch_url(url: str) -> str:
     if not text:
         return f"fetch returned empty content for {url}"
 
-    sid = save_to_scratch(text, prefix="fetch")
+    sid = save_to_scratch(text, prefix="fetch", max_bytes=FETCH_SAVE_CHARS)
     preview = text[:FETCH_INLINE_CHARS]
     truncated = len(text) > FETCH_INLINE_CHARS
     note = f"\n...(truncated, full page saved as scratch:{sid} — use read_scratch to page through it)" if truncated else ""

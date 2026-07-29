@@ -64,6 +64,30 @@ def _get_vault_store():
     return None
 
 
+def _get_memory_collection():
+    """Return the live ChromaDB memory collection, or None.
+
+    ``memory_store`` is the canonical owner of the collection (and of the write
+    lock around it); the ``__main__``/``langbot`` global lookup is kept only for
+    backward compatibility with older layouts. Only an *already imported*
+    ``memory_store`` is used, so a standalone caller doesn't pay for importing
+    the agent's memory stack just to read facts.
+    """
+    _ms = sys.modules.get("components.memory_store")
+    if _ms is not None:
+        try:
+            return _ms.get_collection()
+        except Exception as e:
+            logger.warning("supabase_sync: memory_store collection unavailable: %s", e)
+    try:
+        main = sys.modules.get("__main__") or sys.modules.get("langbot")
+        if main:
+            return getattr(main, "memory_collection", None)
+    except Exception:
+        pass
+    return None
+
+
 def _get_memory_dir() -> Path:
     """Return langbot's MEMORY_DIR at call time."""
     try:
@@ -115,11 +139,8 @@ class SupabaseSync:
         
         # 1. Try reading from ChromaDB (primary source)
         try:
-            main = sys.modules.get("__main__") or sys.modules.get("langbot")
-            collection = None
-            if main:
-                collection = getattr(main, "memory_collection", None)
-            
+            collection = _get_memory_collection()
+
             if collection is None:
                 import chromadb
                 from chromadb.config import Settings
@@ -167,6 +188,17 @@ class SupabaseSync:
         try:
             import uuid
             from datetime import datetime, timezone
+
+            # Preferred path: the canonical store, which also serializes the
+            # write behind its lock and batches the embedding call.
+            try:
+                from . import memory_store as _ms
+
+                _ms.store_memories_batch(facts, timestamps)
+                return True
+            except Exception as e:
+                logger.warning("supabase_sync: memory_store batch store failed: %s", e)
+
             main = sys.modules.get("__main__") or sys.modules.get("langbot")
             collection = None
             embeddings = None
@@ -512,10 +544,7 @@ class SupabaseSync:
 
         # ChromaDB memory count
         try:
-            main = sys.modules.get("__main__") or sys.modules.get("langbot")
-            collection = None
-            if main:
-                collection = getattr(main, "memory_collection", None)
+            collection = _get_memory_collection()
             if collection is None:
                 import chromadb
                 from chromadb.config import Settings
