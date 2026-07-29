@@ -9,10 +9,10 @@ The project root must remain clean — it contains only source code, configurati
 | State Type | Path | Owner |
 |-----------|------|-------|
 | Conversation checkpoints | `./memory/agent_checkpoints.db*` | langbot.py / LangGraph SqliteSaver |
-| Long-term memory (embeddings) | `./memory/agent_memory_chroma/` | Chroma (chromadb) |
+| Long-term memory (embeddings) | `./memory/agent_memory_chroma/` | components/memory_store.py (Chroma) |
 | Encrypted credentials | `./memory/vault/` | components/vault.py |
 | Vault master key | `./memory/vault/.masterkey` | components/vault.py (0600 perms) |
-| Web scratchpad | `./memory/agent_scratch/` | components/web_tools.py (if used) |
+| Tool-result scratchpad | `./memory/agent_scratch/` | components/scratch.py |
 | Knowledge distillation log | `./memory/knowledge.md` | (user-created docs) |
 
 ## Enforcement
@@ -39,7 +39,7 @@ agent_checkpoints.db*         # legacy, kept for safe cleanup
 ### Environment Variables
 - `AGENT_SCRATCH_DIR` — defaults to `./memory/agent_scratch` (can be changed)
 - `SQLITE_DB_PATH` — defaults to `./memory/agent_checkpoints.db`
-- `CHROMA_PERSIST_DIR` — defaults to `./memory/agent_memory_chroma`
+- `AGENT_CHROMA_DIR` — defaults to `./memory/agent_memory_chroma`
 - `LANGBOT_VAULT_PASSWORD` — optional, for vault key wrapping
 
 All new dynamic paths should be configurable via environment variables with defaults in `./memory/`.

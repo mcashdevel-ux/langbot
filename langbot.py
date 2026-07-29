@@ -9,8 +9,8 @@ os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import subprocess
-import json
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from langchain_huggingface import HuggingFaceEmbeddings
 from langgraph.graph import StateGraph, START, END, MessagesState
 from langgraph.prebuilt import ToolNode, tools_condition
 
@@ -32,11 +31,16 @@ except ModuleNotFoundError:
     SQLITE_AVAILABLE = False
     print("Warning: langgraph-checkpoint-sqlite not installed – conversation history will not persist.")
 
-import chromadb
-from chromadb.config import Settings
-
-from components.web_tools import search_web as _search_web, fetch_url as _fetch_url, read_scratch as _read_scratch
-from components.utils import truncate, suppress_native_output, strip_code_fences
+from components.web_tools import search_web as _search_web, fetch_url as _fetch_url
+from components.scratch import read_scratch as _read_scratch
+from components.utils import truncate
+from components.memory_store import (
+    count as _memory_count,
+    get_embeddings as _load_embeddings,
+    recall_memories as _recall_memories,
+    store_memory as _store_memory,
+)
+from components.memory_worker import DistillJob, MemoryWorker
 from components.file_ops import (
     read_file as _read_file,
     write_file as _write_file,
@@ -50,6 +54,7 @@ from components.code_search import (
     glob_list as _glob_list,
 )
 from components import tasks as _tasks
+from components.routing import nudge_agent, route_agent
 
 import components.console as ui
 from components.input import read_input, setup_readline
@@ -66,7 +71,6 @@ from components.vault import (
 BASE_URL = "http://127.0.0.1:8080/v1"
 LLM_MODEL = "local-model"
 SQLITE_DB_PATH = "./memory/agent_checkpoints.db"
-CHROMA_PERSIST_DIR = "./memory/agent_memory_chroma"
 
 # ------------------------------------------------------------------------------
 # 0. Credential Vault — load stored secrets into the environment before the LLM
@@ -85,65 +89,14 @@ llm = ChatOpenAI(
     max_retries=10,
 )
 
-def _load_embeddings():
-    """Construct the embedding model without leaking its loading progress bars
-    onto the console. The heavy transformers/tqdm output is written to the raw
-    stderr fd, so we mute it at the fd level while the weights load."""
-    ui.info("Loading embedding model...")
-    try:
-        import transformers  # noqa: WPS433 (optional, only to quiet it)
-
-        transformers.logging.set_verbosity_error()
-        transformers.logging.disable_progress_bar()
-    except Exception:
-        pass
-    with suppress_native_output():
-        model = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            model_kwargs={'device': 'cpu'},
-            encode_kwargs={'normalize_embeddings': True},
-        )
-    ui.success("Embedding model ready.")
-    return model
-
-
-embeddings = _load_embeddings()
+# Warm the embedding model up front rather than on the first remember/recall,
+# so its (quiet, multi-second) load happens at startup instead of mid-turn.
+_load_embeddings()
 
 # ------------------------------------------------------------------------------
-# 2. Semantic Memory Store
+# 2. Semantic Memory Store (components/memory_store.py) + background distiller
 # ------------------------------------------------------------------------------
-chroma_client = chromadb.PersistentClient(
-    path=CHROMA_PERSIST_DIR,
-    settings=Settings(anonymized_telemetry=False),
-)
-memory_collection = chroma_client.get_or_create_collection(
-    name="agent_longterm_memory",
-    metadata={"hnsw:space": "cosine"},
-)
-
-def _store_memory(text: str) -> str:
-    mem_id = str(uuid.uuid4())
-    vector = embeddings.embed_query(text)
-    memory_collection.add(
-        ids=[mem_id],
-        embeddings=[vector],
-        metadatas=[{"text": text, "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}],
-    )
-    return mem_id
-
-def _recall_memories(query: str, n: int = 3) -> list[str]:
-    count = memory_collection.count()
-    if count == 0:
-        # Chroma rejects n_results < 1, so guard the empty-store case explicitly.
-        return []
-    query_vec = embeddings.embed_query(query)
-    results = memory_collection.query(
-        query_embeddings=[query_vec],
-        n_results=min(n, count),
-    )
-    if not results or not results["metadatas"] or not results["metadatas"][0]:
-        return []
-    return [meta.get("text", "") for meta in results["metadatas"][0] if meta.get("text")]
+_memory_worker = MemoryWorker(llm=llm)
 
 # ------------------------------------------------------------------------------
 # 3. Tools (original + memory)
@@ -195,7 +148,11 @@ def execute_shell_command(command: str, cwd: str = "", timeout: int = 120) -> st
 
 @tool
 def read_any_file(file_path: str) -> str:
-    """Read any text file. Binary files are reported by size, not dumped."""
+    """Read any text file. Binary files are reported by size, not dumped.
+
+    Large files are truncated inline; call 'read_scratch' with the returned id
+    to see the rest.
+    """
     return _read_file(file_path)
 
 @tool
@@ -229,12 +186,18 @@ def git_diff(file_path: str = ".", cached: bool = False) -> str:
 
 @tool
 def find_in_files(pattern: str, path: str = ".") -> str:
-    """Search for a text pattern across source/text files (recursive)."""
+    """Search for a text pattern across source/text files (recursive).
+
+    Result sets over 20 matches are paged via 'read_scratch'.
+    """
     return _find_in_files(pattern, path)
 
 @tool
 def read_many_files(pattern: str, max_files: int = 20) -> str:
-    """Read multiple files matching a glob pattern (e.g. 'src/**/*.py')."""
+    """Read multiple files matching a glob pattern (e.g. 'src/**/*.py').
+
+    Large result sets are truncated inline and paged via 'read_scratch'.
+    """
     return _read_many_files(pattern, max_files=max_files)
 
 @tool
@@ -337,13 +300,15 @@ def agent(state: MessagesState):
 # ------------------------------------------------------------------------------
 def distill_knowledge(state: MessagesState) -> MessagesState:
     """
-    Extract important facts from the most recent user request and assistant response,
-    and save them to long-term memory automatically.
+    Hand the turn's user request, tool results, and answer to the background
+    memory worker, which extracts durable facts and stores them off the graph's
+    critical path.
 
-    Guard: only distil when the turn actually executed at least one tool call that
-    returned a result.  If the model only *described* what it would do (no tool
-    messages in this turn), there is nothing factual to extract — storing the
-    assistant's intentions as facts would poison the memory with hallucinations.
+    Guard: only distil when the turn actually executed at least one tool call
+    that returned a result. If the model only *described* what it would do (no
+    tool messages in this turn), there is nothing factual to extract — storing
+    the assistant's intentions as facts would poison the memory with
+    hallucinations.
     """
     user_msgs = [m for m in state["messages"] if isinstance(m, HumanMessage)]
     ai_msgs = [m for m in state["messages"] if m.type == "ai" and m.content]
@@ -351,7 +316,6 @@ def distill_knowledge(state: MessagesState) -> MessagesState:
     if not user_msgs or not ai_msgs:
         return state
 
-    # ── Fix 1: only distil from turns where tools were actually invoked ──────
     # Find the index of the last HumanMessage so we only inspect the current turn.
     last_human_idx = max(
         i for i, m in enumerate(state["messages"]) if isinstance(m, HumanMessage)
@@ -361,58 +325,21 @@ def distill_knowledge(state: MessagesState) -> MessagesState:
     if not tool_results:
         logger.debug("Knowledge distillation skipped: no tool results in this turn.")
         return state
-    # ─────────────────────────────────────────────────────────────────────────
-
-    last_user = user_msgs[-1].content
-    last_ai = ai_msgs[-1].content
 
     # Build context from actual tool outputs so the distillation model has
     # grounded evidence rather than the assistant's prose descriptions.
-    tool_context_lines = []
-    for m in tool_results:
-        name = getattr(m, "name", "tool")
-        content = m.content if isinstance(m.content, str) else str(m.content)
-        tool_context_lines.append(f"[{name}]: {content[:400]}")
-    tool_context = "\n".join(tool_context_lines)
+    tool_context = "\n".join(
+        f"[{getattr(m, 'name', 'tool')}]: "
+        f"{(m.content if isinstance(m.content, str) else str(m.content))[:400]}"
+        for m in tool_results
+    )
 
-    distillation_prompt = f"""
-You are a knowledge extraction module. Look at the following user request, the tool
-results that were actually returned this turn, and the assistant's final response.
-Extract only factual information that is GROUNDED IN THE TOOL RESULTS — do not infer
-or store anything the assistant merely described doing without evidence in the tool output.
-Useful facts include:
-- User preferences (e.g., "the user prefers DuckDuckGo")
-- Confirmed facts from tool output (e.g., "project located at ~/code/myapp")
-- Decisions or conclusions that are supported by evidence
-- Context helpful for future interactions
-
-User request: {last_user}
-Tool results this turn:
-{tool_context}
-Assistant response: {last_ai}
-
-Return ONLY a JSON array of strings, each a standalone factual statement grounded in
-the tool results above. If nothing is clearly supported by evidence, return [].
-Do not include explanations, markdown, or extra text.
-"""
-    try:
-        raw = llm.invoke(distillation_prompt).content.strip()
-        raw = strip_code_fences(raw)
-        facts = json.loads(raw)
-        if not isinstance(facts, list):
-            logger.warning("Knowledge distillation skipped: model output was not a JSON array")
-            return state
-        for fact in facts:
-            if isinstance(fact, str) and fact.strip():
-                _store_memory(fact)
-            # Optional console feedback – quiet by default
-    except json.JSONDecodeError as e:
-        # Model returned something that wasn't a JSON array; distillation is a
-        # bonus, so we don't break the main loop — but we don't hide it either.
-        logger.warning("Knowledge distillation skipped: could not parse model output as JSON: %s", e)
-    except Exception as e:
-        logger.warning("Knowledge distillation failed: %s", e, exc_info=True)
-
+    _memory_worker.enqueue(DistillJob(
+        user_text=user_msgs[-1].content,
+        ai_text=ai_msgs[-1].content,
+        tool_context=tool_context,
+        enqueued_at=time.time(),
+    ))
     return state
 
 # ------------------------------------------------------------------------------
@@ -430,107 +357,6 @@ def tools_node(state: MessagesState):
                 and isinstance(getattr(msg, "content", None), str):
             msg.content = _vault_redact(msg.content)
     return result
-
-# ── Fix 2: failure-mode detection phrases ────────────────────────────────────
-# Phrases that indicate the model is asking for permission instead of acting.
-PERMISSION_PHRASES = (
-    "would you like me to",
-    "would you like to proceed",
-    "should i proceed",
-    "shall i proceed",
-    "do you want me to",
-    "can i proceed",
-    "let me know if you would like",
-    "if you would like me to",
-    "would you like to",
-    "would you like me",
-    "please confirm",
-    "please let me know",
-    "do you want to proceed",
-)
-
-# Patterns that indicate the model is hallucinating tool calls as code blocks
-# instead of invoking the actual function-calling interface.
-TOOL_AVOIDANCE_PATTERNS = (
-    "import search_web",
-    "import fetch_url",
-    "import execute_shell",
-    "search_web.search(",
-    "fetch_url(",
-    "requests.get(",          # writing raw HTTP calls instead of using tools
-    "requests.post(",
-    "subprocess.run(",         # using shell inside a code block instead of the tool
-    "```python\nimport",       # code fence opening with an import
-    "```bash\ncurl",           # writing curl in a bash block instead of the tool
-    "```\ncurl",
-    "curl -h ",
-    "curl -o ",
-    "{{vault_get",            # hallucinated template syntax
-    "{{vault",
-)
-# ─────────────────────────────────────────────────────────────────────────────
-
-_NUDGE_PERMISSION = (
-    "[AUTONOMOUS AGENT DIRECTIVE]: You just asked for permission or confirmation instead of acting. "
-    "Do NOT ask the user whether to proceed. "
-    "Invoke the required tool calls RIGHT NOW to complete the user request."
-)
-
-_NUDGE_CODE_BLOCK = (
-    "[AUTONOMOUS AGENT DIRECTIVE]: You wrote code or curl commands in a text block instead of "
-    "calling your native tools. You have tools available — search_web, fetch_url, "
-    "execute_shell_command, vault, etc. DO NOT write Python or bash blocks that pretend to use "
-    "these tools. Call them DIRECTLY via the function-calling interface RIGHT NOW."
-)
-
-
-def _ai_turns_since_human(messages) -> int:
-    """Count consecutive AI messages back to (not including) the last HumanMessage."""
-    count = 0
-    for m in reversed(messages):
-        if isinstance(m, HumanMessage):
-            break
-        if getattr(m, "type", None) == "ai":
-            count += 1
-    return count
-
-
-def nudge_agent(state: MessagesState):
-    """Nudge node: inject a targeted correction when the model either asked for
-    permission or hallucinated tool calls as code blocks instead of invoking them."""
-    last_msg = state["messages"][-1]
-    content = getattr(last_msg, "content", "") or ""
-    content_lower = content.lower()
-
-    # Pick the nudge message most appropriate to the detected failure mode.
-    if any(pat in content_lower for pat in TOOL_AVOIDANCE_PATTERNS):
-        nudge_text = _NUDGE_CODE_BLOCK
-    else:
-        nudge_text = _NUDGE_PERMISSION
-
-    return {"messages": [SystemMessage(content=nudge_text)]}
-
-
-def route_agent(state: MessagesState):
-    last_msg = state["messages"][-1]
-    if last_msg.type == "ai" and hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-        return "tools"
-
-    if last_msg.type == "ai" and isinstance(getattr(last_msg, "content", None), str):
-        content = last_msg.content
-        content_lower = content.lower()
-
-        needs_nudge = (
-            any(phrase in content_lower for phrase in PERMISSION_PHRASES)
-            or any(pat in content_lower for pat in TOOL_AVOIDANCE_PATTERNS)
-        )
-
-        if needs_nudge:
-            # Allow up to 5 re-tries per human turn before giving up.
-            if _ai_turns_since_human(state["messages"]) < 5:
-                return "nudge"
-
-    return "distill"
 
 builder = StateGraph(MessagesState)
 builder.add_node("agent", agent)
@@ -596,10 +422,18 @@ def _stream_turn(app, config, user_input: str) -> None:
     end). A spinner covers the wait before the first panel is emitted. The
     ``distill`` node re-emits the whole state, so we only render output from the
     ``agent`` and ``tools`` nodes.
+
+    One human turn yields at most one final-answer panel: a second no-tool-call
+    AI message is a duplicate (see routing.route_agent's guard) and is dropped
+    instead of rendered. At DEBUG level every chunk's (node, message types) is
+    logged so a duplicate can be traced back to its source — a second ``agent``
+    invocation with no ``tools``/``nudge`` message in between points at the
+    graph, whereas two AI messages in one update points at the LLM server.
     """
     spinner = ui.GradientSpinner("Thinking...")
     spinner.start()
     spinner_running = True
+    answered = False
     try:
         for chunk in app.stream(
             {"messages": [HumanMessage(content=user_input)]},
@@ -607,13 +441,30 @@ def _stream_turn(app, config, user_input: str) -> None:
             stream_mode="updates",
         ):
             for node, update in chunk.items():
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "stream chunk: node=%s messages=%s", node,
+                        [getattr(m, "type", None) for m in (update or {}).get("messages", [])],
+                    )
                 if node not in ("agent", "tools") or not update:
                     continue
                 for msg in update.get("messages", []):
+                    is_final_answer = (
+                        getattr(msg, "type", None) == "ai"
+                        and msg.content
+                        and not (getattr(msg, "tool_calls", None) or [])
+                    )
+                    if is_final_answer and answered:
+                        logger.warning(
+                            "dropping a duplicate final answer for this turn (preview: %r)",
+                            str(msg.content)[:120],
+                        )
+                        continue
                     if spinner_running:
                         spinner.stop()
                         spinner_running = False
                     _render_message(msg)
+                    answered = answered or bool(is_final_answer)
     finally:
         if spinner_running:
             spinner.stop()
@@ -657,12 +508,15 @@ def _handle_slash(text: str, config: dict) -> bool:
         ui.kv("model", LLM_MODEL)
         ui.kv("tools", str(len(tools)))
         ui.kv("thread_id", config["configurable"]["thread_id"])
-        ui.kv("memories", str(memory_collection.count()))
+        ui.kv("memories", str(_memory_count()))
+        ui.kv("memory queue depth", str(_memory_worker.qsize()))
         ui.kv("checkpointer", "sqlite" if SQLITE_AVAILABLE else "memory")
         return False
     if cmd == "health":
         ui.kv("checkpointer", "sqlite" if SQLITE_AVAILABLE else "memory")
-        ui.kv("memories", str(memory_collection.count()))
+        ui.kv("memories", str(_memory_count()))
+        ui.kv("memory queue depth", str(_memory_worker.qsize()))
+        ui.kv("memory jobs dropped", str(_memory_worker.dropped_count()))
         ui.kv("vault creds", str(len(_VAULT_ENV_LOADED)))
         ui.kv("bg tasks", str(len(_tasks.manager.list())))
         return False
@@ -757,6 +611,7 @@ def main() -> None:
             app = builder.compile(checkpointer=checkpointer)
             run_repl(app, config)
     finally:
+        _memory_worker.shutdown(timeout=10.0)
         _vault_save()
 
 

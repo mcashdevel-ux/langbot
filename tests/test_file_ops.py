@@ -4,6 +4,7 @@ import os
 import subprocess
 
 import components.file_ops as file_ops
+import components.scratch as scratch
 
 
 class TestReadFile:
@@ -26,6 +27,18 @@ class TestReadFile:
         out = file_ops.read_file(str(p))
         assert "Binary file" in out
         assert "b.bin" in out
+
+    def test_large_file_previewed_and_saved_to_scratch(self, tmp_path):
+        content = "".join(f"line {i}\n" for i in range(5000))
+        assert len(content) > 40_000
+        p = tmp_path / "big.txt"
+        p.write_text(content)
+        out = file_ops.read_file(str(p))
+        assert "scratch:file_" in out
+        assert len(out) < 2 * file_ops.READ_INLINE_CHARS
+        sid = out.split("scratch:")[1].split(")")[0]
+        page = scratch.read_scratch(sid, offset=0, length=len(content) + 10)
+        assert page.split("\n", 1)[1] == content
 
     def test_directory_rejected(self, tmp_path):
         assert "Not a file" in file_ops.read_file(str(tmp_path))
