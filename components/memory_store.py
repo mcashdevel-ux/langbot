@@ -15,7 +15,6 @@ warms them at startup via ``get_embeddings()``), so importing this module is
 cheap and its state is injectable in tests.
 """
 
-import os
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -24,10 +23,15 @@ import chromadb
 from chromadb.config import Settings
 
 from . import console as ui
+from .config import config
 from .utils import suppress_native_output
 
-CHROMA_PERSIST_DIR = os.environ.get("AGENT_CHROMA_DIR", "./memory/agent_memory_chroma")
-COLLECTION_NAME = "agent_longterm_memory"
+CHROMA_PERSIST_DIR = config.get("paths.chroma_dir", "./memory/agent_memory_chroma",
+                                env="AGENT_CHROMA_DIR")
+COLLECTION_NAME = config.get("memory.collection_name", "agent_longterm_memory")
+EMBEDDING_MODEL = config.get("memory.embedding_model",
+                             "sentence-transformers/all-MiniLM-L6-v2")
+EMBEDDING_DEVICE = config.get("memory.embedding_device", "cpu")
 
 _write_lock = threading.Lock()
 _init_lock = threading.Lock()
@@ -58,8 +62,8 @@ def get_embeddings():
 
         with suppress_native_output():
             _embeddings = HuggingFaceEmbeddings(
-                model_name="sentence-transformers/all-MiniLM-L6-v2",
-                model_kwargs={'device': 'cpu'},
+                model_name=EMBEDDING_MODEL,
+                model_kwargs={'device': EMBEDDING_DEVICE},
                 encode_kwargs={'normalize_embeddings': True},
             )
         ui.success("Embedding model ready.")

@@ -14,15 +14,21 @@ import json
 import time
 import requests
 
+from .config import config
 from .engines import search_engine  # sibling module in the components package
 from .scratch import save_to_scratch, read_scratch  # noqa: F401 (re-exported)
 
-SEARCH_SNIPPET_CHARS = 160     # per-result snippet shown inline to the model
-SEARCH_MAX_RESULTS = 5         # hard cap, regardless of what the model asks for
-FETCH_INLINE_CHARS = 1800      # how much of a fetched page goes inline
-FETCH_SAVE_CHARS = 20000       # how much of a fetched page we keep on disk at all
-JINA_TIMEOUT = 25
-JINA_RETRY_ON_429 = 1          # anonymous Jina reader is rate-limited; one retry
+# per-result snippet shown inline to the model
+SEARCH_SNIPPET_CHARS = config.get("web.search_snippet_chars", 160)
+# hard cap, regardless of what the model asks for
+SEARCH_MAX_RESULTS = config.get("web.search_max_results", 5)
+# how much of a fetched page goes inline
+FETCH_INLINE_CHARS = config.get("web.fetch_inline_chars", 1800)
+# how much of a fetched page we keep on disk at all
+FETCH_SAVE_CHARS = config.get("web.fetch_save_chars", 20000)
+JINA_TIMEOUT = config.get("web.jina_timeout", 25)
+# anonymous Jina reader is rate-limited; one retry
+JINA_RETRY_ON_429 = config.get("web.jina_retry_on_429", 1)
 
 
 def search_web(query: str, engine: str = "duckduckgo", max_results: int = 5) -> str:

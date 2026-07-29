@@ -22,7 +22,9 @@ import uuid
 from dataclasses import dataclass
 from typing import Optional
 
-TASKS_DIR = os.environ.get("AGENT_TASKS_DIR", "./memory/agent_tasks")
+from .config import config
+
+TASKS_DIR = config.get("paths.tasks_dir", "./memory/agent_tasks", env="AGENT_TASKS_DIR")
 
 _IS_WINDOWS = sys.platform == "win32"
 
