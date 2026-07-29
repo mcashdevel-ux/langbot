@@ -1,0 +1,50 @@
+{
+  "_comment": "Copy to langbot.config.json (or point $LANGBOT_CONFIG at it) and keep only the keys you want to change. Every key is optional; anything omitted, misspelled, or of the wrong type falls back to the built-in default shown here.",
+
+  "llm": {
+    "base_url": "http://127.0.0.1:8080/v1",
+    "model": "local-model",
+    "temperature": 0.1,
+    "max_retries": 10
+  },
+
+  "paths": {
+    "checkpoint_db": "./memory/agent_checkpoints.db",
+    "chroma_dir": "./memory/agent_memory_chroma",
+    "scratch_dir": "./memory/agent_scratch",
+    "tasks_dir": "./memory/agent_tasks",
+    "vault_dir": "memory/vault"
+  },
+
+  "memory": {
+    "collection_name": "agent_longterm_memory",
+    "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+    "embedding_device": "cpu",
+    "worker_queue_size": 50,
+    "worker_batch_size": 5,
+    "worker_shutdown_timeout": 10.0
+  },
+
+  "tools": {
+    "read_inline_chars": 1500,
+    "grep_inline_lines": 20,
+    "manyfiles_inline_chars": 4000,
+    "scratch_save_chars": 200000,
+    "max_output_chars": 20000
+  },
+
+  "web": {
+    "search_snippet_chars": 160,
+    "search_max_results": 5,
+    "fetch_inline_chars": 1800,
+    "fetch_save_chars": 20000,
+    "jina_timeout": 25,
+    "jina_retry_on_429": 1,
+    "searxng_settings_path": "/etc/searxng/settings.yml",
+    "searxng_source_dir": ""
+  },
+
+  "routing": {
+    "max_nudges_per_turn": 5
+  }
+}

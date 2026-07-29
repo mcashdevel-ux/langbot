@@ -85,17 +85,42 @@ git clone --depth 1 https://github.com/searxng/searxng ~/searxng-src
 
 ## Configuration
 
-Edit the constants at the top of `langbot.py`:
+The config file is **optional** — every setting has a built-in default, so langbot runs
+unchanged with no config file at all. To override something, copy the template and edit
+only the keys you care about:
 
-| Constant | Default | Purpose |
-|----------|---------|---------|
-| `BASE_URL` | `http://127.0.0.1:8080/v1` | OpenAI-compatible LLM endpoint |
-| `LLM_MODEL` | `local-model` | Model name sent to the endpoint |
-| `SQLITE_DB_PATH` | `./memory/agent_checkpoints.db` | Conversation checkpoint DB |
-| `CHROMA_PERSIST_DIR` | `./memory/agent_memory_chroma` | Long-term memory store (`components/memory_store.py`) |
+```bash
+cp langbot.config.example.json langbot.config.json
+```
 
-Environment variables:
+Lookup order (first file found wins):
 
+1. `$LANGBOT_CONFIG` — explicit path to a JSON config file
+2. `./langbot.config.json` — current working directory
+3. `~/.config/langbot/config.json`
+
+A missing, malformed, or partially filled file is never fatal: langbot logs a warning
+where relevant and falls back to defaults key by key (a wrong-typed value falls back on
+its own, the rest of the file still applies). `/config` in the REPL shows which file (if
+any) is in use and the values actually in effect.
+
+Precedence for a single setting: **environment variable > config file > default.**
+
+| Section | Keys | Notes |
+|---------|------|-------|
+| `llm` | `base_url`, `model`, `temperature`, `max_retries` | OpenAI-compatible endpoint |
+| `paths` | `checkpoint_db`, `chroma_dir`, `scratch_dir`, `tasks_dir`, `vault_dir` | keep inside `./memory/` per `MEMORY_POLICY.md` |
+| `memory` | `collection_name`, `embedding_model`, `embedding_device`, `worker_queue_size`, `worker_batch_size`, `worker_shutdown_timeout` | background distiller + vector store |
+| `tools` | `read_inline_chars`, `grep_inline_lines`, `manyfiles_inline_chars`, `scratch_save_chars`, `max_output_chars` | how much tool output goes inline vs. to scratch |
+| `web` | `search_snippet_chars`, `search_max_results`, `fetch_inline_chars`, `fetch_save_chars`, `jina_timeout`, `jina_retry_on_429`, `searxng_settings_path`, `searxng_source_dir` | search/fetch behaviour |
+| `routing` | `max_nudges_per_turn` | autonomy nudge budget per turn |
+
+See [`langbot.config.example.json`](./langbot.config.example.json) for every key with its
+default value.
+
+Environment variables (override the config file):
+
+- `LANGBOT_CONFIG` — path to the config file to load.
 - `SEARXNG_SETTINGS_PATH` — path to a SearXNG `settings.yml` (defaults to
   `/etc/searxng/settings.yml`, then the source's bundled settings).
 - `AGENT_SCRATCH_DIR` — where scratch files are written (default
@@ -125,8 +150,8 @@ Type `quit` or `exit` (or Ctrl+C / Ctrl+D) to leave. Conversation state persists
 runs via the SQLite checkpointer.
 
 Local REPL commands (not sent to the model): `/help`, `/new` (or `/clear`, starts a fresh
-conversation thread), `/info`, `/health`, `/ls [dir]`, `/knowledge <query>`, `/save <fact>`,
-`/quit`.
+conversation thread), `/info`, `/health`, `/config`, `/ls [dir]`, `/knowledge <query>`,
+`/save <fact>`, `/quit`.
 
 ### Tests
 
@@ -162,6 +187,7 @@ components/
   file_ops.py           # read/write/patch/batch_patch/git_diff file tools
   code_search.py        # find_in_files / read_many_files / glob_list
   tasks.py              # background task manager (start/list/status/output/kill)
+  config.py             # optional config file (langbot.config.json) with default fallbacks
   scratch.py            # shared on-disk scratchpad + read_scratch paging
   memory_store.py       # embeddings + Chroma collection (store/recall, write lock)
   memory_worker.py      # background distillation queue (off the graph's critical path)
@@ -172,6 +198,7 @@ components/
   input.py              # readline input UX used by the REPL
   console.py            # terminal UI helpers used by the REPL
   utils.py              # shared helpers (atomic JSON writes, truncation)
+langbot.config.example.json  # template listing every setting and its default
 CODE_REVIEW.md          # review of the initial commit with known issues + fixes
 MEMORY_POLICY.md        # where persistent state may live (./memory/ only)
 CONTRIBUTING.md         # how to contribute + where help is wanted

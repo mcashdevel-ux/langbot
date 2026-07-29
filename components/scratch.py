@@ -5,19 +5,22 @@ preview to the model; ``read_scratch`` pages through the rest on demand. This
 keeps big results (web pages, file contents, grep output) out of the message
 thread while still reachable.
 
-Leaf module by design — it depends on nothing else in ``components`` so any
-tool module can import it without risking an import cycle.
+Near-leaf module by design — it depends only on ``config`` (itself dependency
+free), so any tool module can import it without risking an import cycle.
 """
 
 import os
 import uuid
 
-SCRATCH_DIR = os.environ.get("AGENT_SCRATCH_DIR", "./memory/agent_scratch")
+from .config import config
+
+SCRATCH_DIR = config.get("paths.scratch_dir", "./memory/agent_scratch",
+                         env="AGENT_SCRATCH_DIR")
 os.makedirs(SCRATCH_DIR, exist_ok=True)
 
 # Default on-disk cap. Generous compared to what any tool shows inline: the
 # point of scratch is that the *full* result stays retrievable.
-SCRATCH_SAVE_CHARS = 200_000
+SCRATCH_SAVE_CHARS = config.get("tools.scratch_save_chars", 200_000)
 
 
 def _new_scratch_id(prefix: str) -> str:

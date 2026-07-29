@@ -12,8 +12,10 @@ import tempfile
 from pathlib import Path
 from typing import Any, Union
 
+from .config import config
+
 # Default cap for tool output / file reads surfaced to the model.
-MAX_OUTPUT_CHARS = 20000
+MAX_OUTPUT_CHARS = config.get("tools.max_output_chars", 20000)
 TRUNCATION_MARKER = "\n...[truncated]"
 
 

@@ -34,6 +34,8 @@ except ModuleNotFoundError:
 from components.web_tools import search_web as _search_web, fetch_url as _fetch_url
 from components.scratch import read_scratch as _read_scratch
 from components.utils import truncate
+# Aliased: `config` is the per-thread graph config in this module's REPL helpers.
+from components.config import CONFIG_ENV_VAR, CONFIG_FILENAME, config as app_config
 from components.memory_store import (
     count as _memory_count,
     get_embeddings as _load_embeddings,
@@ -54,6 +56,14 @@ from components.code_search import (
     glob_list as _glob_list,
 )
 from components import tasks as _tasks
+from components import (
+    code_search as _code_search,
+    file_ops as _file_ops,
+    memory_store as _memory_store,
+    memory_worker as _memory_worker_mod,
+    scratch as _scratch,
+    web_tools as _web_tools,
+)
 from components.routing import nudge_agent, route_agent
 
 import components.console as ui
@@ -66,11 +76,14 @@ from components.vault import (
 )
 
 # ------------------------------------------------------------------------------
-# Configuration
+# Configuration — every value below has a working default, so ./langbot.config.json
+# (see components/config.py for the search order) is entirely optional.
 # ------------------------------------------------------------------------------
-BASE_URL = "http://127.0.0.1:8080/v1"
-LLM_MODEL = "local-model"
-SQLITE_DB_PATH = "./memory/agent_checkpoints.db"
+BASE_URL = app_config.get("llm.base_url", "http://127.0.0.1:8080/v1")
+LLM_MODEL = app_config.get("llm.model", "local-model")
+LLM_TEMPERATURE = app_config.get("llm.temperature", 0.1)
+LLM_MAX_RETRIES = app_config.get("llm.max_retries", 10)
+SQLITE_DB_PATH = app_config.get("paths.checkpoint_db", "./memory/agent_checkpoints.db")
 
 # ------------------------------------------------------------------------------
 # 0. Credential Vault — load stored secrets into the environment before the LLM
@@ -85,8 +98,8 @@ llm = ChatOpenAI(
     model=LLM_MODEL,
     base_url=BASE_URL,
     api_key="not-needed",
-    temperature=0.1,
-    max_retries=10,
+    temperature=LLM_TEMPERATURE,
+    max_retries=LLM_MAX_RETRIES,
 )
 
 # Warm the embedding model up front rather than on the first remember/recall,
@@ -476,6 +489,7 @@ _SLASH_HELP = [
     ("/new, /clear", "Start a fresh conversation (new memory thread)"),
     ("/info", "Show model, tool count, thread, memory size"),
     ("/health", "Show checkpointer, memory, vault, and task status"),
+    ("/config", "Show the active config file (or that defaults are in use)"),
     ("/ls [dir]", "List files in a directory"),
     ("/knowledge <q>", "Search long-term memory"),
     ("/save <fact>", "Store a fact in long-term memory"),
@@ -504,8 +518,25 @@ def _handle_slash(text: str, config: dict) -> bool:
         config["configurable"]["thread_id"] = new_id
         ui.success(f"Started a fresh conversation (thread {new_id}).")
         return False
+    if cmd == "config":
+        ui.kv("config file", app_config.describe())
+        if not app_config.loaded:
+            ui.info(f"Create ./{CONFIG_FILENAME} (or set ${CONFIG_ENV_VAR}) to override "
+                    f"defaults; see {CONFIG_FILENAME}.example.")
+        ui.kv("llm", f"{LLM_MODEL} @ {BASE_URL} (temp {LLM_TEMPERATURE})")
+        ui.kv("checkpoint db", SQLITE_DB_PATH)
+        ui.kv("memory store", _memory_store.CHROMA_PERSIST_DIR)
+        ui.kv("scratch dir", _scratch.SCRATCH_DIR)
+        ui.kv("tasks dir", _tasks.TASKS_DIR)
+        ui.kv("inline caps", f"file {_file_ops.READ_INLINE_CHARS}, "
+                             f"grep {_code_search.GREP_INLINE_LINES} lines, "
+                             f"fetch {_web_tools.FETCH_INLINE_CHARS}")
+        ui.kv("memory worker", f"queue {_memory_worker_mod.MAX_QUEUE_SIZE}, "
+                               f"batch {_memory_worker_mod.MAX_BATCH}")
+        return False
     if cmd == "info":
         ui.kv("model", LLM_MODEL)
+        ui.kv("config file", app_config.describe())
         ui.kv("tools", str(len(tools)))
         ui.kv("thread_id", config["configurable"]["thread_id"])
         ui.kv("memories", str(_memory_count()))
