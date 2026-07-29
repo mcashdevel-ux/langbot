@@ -9,13 +9,35 @@ import glob as _glob
 import os
 import subprocess
 
+from .config import config
+from .scratch import save_to_scratch
 from .utils import truncate
+
+# Matches shown inline; larger result sets are saved whole to scratch and paged
+# through with read_scratch.
+GREP_INLINE_LINES = config.get("tools.grep_inline_lines", 20)
+# Inline cap for read_many_files; the full concatenation goes to scratch.
+MANYFILES_INLINE_CHARS = config.get("tools.manyfiles_inline_chars", 4000)
+
+
+def _format_matches(pattern: str, lines: list[str]) -> str:
+    """Render grep-style match lines, paging via scratch past the inline cap."""
+    if not lines:
+        return f"No matches for '{pattern}'."
+    if len(lines) <= GREP_INLINE_LINES:
+        return truncate("\n".join(lines))
+    sid = save_to_scratch("\n".join(lines), prefix="grep")
+    preview = "\n".join(lines[:GREP_INLINE_LINES])
+    return (f"{len(lines)} matches for '{pattern}' (showing first "
+            f"{GREP_INLINE_LINES}; full list at scratch:{sid}):\n{preview}")
 
 
 def find_in_files(pattern: str, path: str = ".") -> str:
     """Search for ``pattern`` across common source/text files (grep -rn).
 
-    Falls back to a pure-Python scan when ``grep`` is unavailable.
+    Falls back to a pure-Python scan when ``grep`` is unavailable. Result sets
+    larger than ``GREP_INLINE_LINES`` are saved to scratch and previewed, so no
+    match is silently dropped.
     """
     if not pattern:
         return "Error: empty pattern."
@@ -26,7 +48,7 @@ def find_in_files(pattern: str, path: str = ".") -> str:
     try:
         result = subprocess.run(
             ["grep", "-rn"] + [f"--include={g}" for g in includes]
-            + ["-m", "5", "--", pattern, path or "."],
+            + ["--", pattern, path or "."],
             capture_output=True, text=True, timeout=30,
         )
     except subprocess.TimeoutExpired:
@@ -36,9 +58,7 @@ def find_in_files(pattern: str, path: str = ".") -> str:
     except OSError as e:
         return f"Error: {e}"
     output = (result.stdout or "").strip()
-    if not output:
-        return f"No matches for '{pattern}'."
-    return truncate(output)
+    return _format_matches(pattern, output.splitlines() if output else [])
 
 
 def _find_in_files_py(pattern: str, path: str = ".") -> str:
@@ -58,11 +78,9 @@ def _find_in_files_py(pattern: str, path: str = ".") -> str:
                     for i, line in enumerate(f, 1):
                         if pattern in line:
                             results.append(f"{fp}:{i}:{line.strip()[:200]}")
-                            if len(results) >= 100:
-                                return truncate("\n".join(results))
             except OSError:
                 continue
-    return truncate("\n".join(results)) if results else f"No matches for '{pattern}'."
+    return _format_matches(pattern, results)
 
 
 def read_many_files(pattern: str, max_files: int = 20, max_chars_per_file: int = 10000) -> str:
@@ -77,7 +95,7 @@ def read_many_files(pattern: str, max_files: int = 20, max_chars_per_file: int =
     if not files:
         return f"No files matching '{pattern}'."
     files = files[:max_files]
-    parts, total = [], 0
+    parts = []
     for f in files:
         try:
             with open(f, "r", encoding="utf-8", errors="replace") as fh:
@@ -86,11 +104,13 @@ def read_many_files(pattern: str, max_files: int = 20, max_chars_per_file: int =
             parts.append(f"--- {f} ---\nError: {e}")
             continue
         parts.append(f"--- {f} ---\n{body}")
-        total += len(body)
-        if total > 50000:
-            parts.append("... (truncated, total output exceeds 50K chars)")
-            break
-    return "\n\n".join(parts)
+    full = "\n\n".join(parts)
+    if len(full) <= MANYFILES_INLINE_CHARS:
+        return full
+    sid = save_to_scratch(full, prefix="manyfiles")
+    return (f"{len(files)} file(s) matching '{pattern}' — {len(full)} chars, showing "
+            f"first {MANYFILES_INLINE_CHARS} (full text at scratch:{sid}):\n"
+            f"{full[:MANYFILES_INLINE_CHARS]}")
 
 
 def glob_list(pattern: str, max_results: int = 100) -> str:
