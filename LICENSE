@@ -1,0 +1,54 @@
+langbot — Personal Use License
+Copyright (c) 2026 mcashdevel-ux. All rights reserved.
+
+Permission is hereby granted to use this software for personal purposes only.
+
+1. Permitted Use
+   You may use this software for personal, non-commercial purposes, including:
+   - Running the software on your own systems
+   - Modifying the software for your personal use
+   - Studying and understanding how the software works
+
+2. Restrictions
+   You may NOT:
+   a. Reuse, copy, or incorporate this software or any portion of it into
+      another repository, project, product, or service (free or commercial)
+      without prior written consent from the copyright holder;
+   b. Redistribute, sublicense, sell, or publicly share this software or
+      derivative works;
+   c. Present this software or derivative works as your own work;
+   d. Remove or alter any copyright, trademark, or other proprietary notices.
+
+3. Contributions
+   Contributions submitted to this repository (including pull requests, patches,
+   issues, and suggestions) are provided on the terms set out in
+   CONTRIBUTING.md: the contributor assigns to the copyright holder all right,
+   title, and interest in the contribution, or, where assignment is not
+   permitted by law, grants the copyright holder a perpetual, worldwide,
+   irrevocable, royalty-free, sublicensable license to use it without
+   restriction.
+
+4. Third-Party Components
+   The Software depends on third-party open-source packages that are not
+   covered by this license and remain subject to their own license terms.
+
+5. No Warranty
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+6. Limitation of Liability
+   IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR
+   OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE,
+   ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+   DEALINGS IN THE SOFTWARE. The Software grants an AI agent unrestricted
+   shell, file, and network access on the host that runs it; you assume all
+   risk arising from running it.
+
+7. Termination
+   This license is effective until terminated. It terminates automatically if
+   you breach any of its terms. On termination, you must cease all use of
+   the Software and destroy all copies in your possession.
+
+For licensing inquiries or to request permission for reuse, contact the
+copyright holder via the repository's issue tracker.
