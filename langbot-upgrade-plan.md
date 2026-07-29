@@ -13,11 +13,70 @@ restructures further.
 
 ---
 
+## Status — implemented
+
+All three tracks landed together in [#14](https://github.com/mcashdevel-ux/langbot/pull/14)
+(commit `27537ed`), not in the staged A → B → C order the plan suggested. 333 tests pass
+(`python -m pytest`); there is no lint/typecheck config in the repo, so `pyflakes` was used
+as the closest check.
+
+Legend: **DONE** · **DONE (deviation)** — implemented differently than written · **OPEN** —
+not done.
+
+| Step | Status | Note |
+|---|---|---|
+| A1 extract `scratch.py` | DONE (deviation) | cap is `SCRATCH_SAVE_CHARS`, now config-driven |
+| A2 point `web_tools.py` at it | DONE | 20,000-char cap preserved via `max_bytes=FETCH_SAVE_CHARS` |
+| A3 `find_in_files` via scratch, no `-m 5` | DONE | both `grep` and the pure-Python fallback |
+| A4 `read_many_files` via scratch | DONE | |
+| A5 `read_file` via scratch | DONE | |
+| A6 tool docstrings | DONE | |
+| A7 Track A tests | DONE (deviation) | steps 1–3 automated; step 4 (manual dogfooding repro) still OPEN — no local LLM server available |
+| B1 `final_answers_since_human` | DONE (deviation) | lives in new `components/routing.py`, not `langbot.py` |
+| B2 guard in `route_agent` | DONE | plus render-side suppression in `_stream_turn` (beyond plan) |
+| B3 diagnostics | DONE (deviation) | warning + DEBUG stream trace shipped; step 3 (root-cause follow-up from real logs) still OPEN |
+| B4 Track B tests | DONE | |
+| C1 `memory_store.py` | DONE (deviation) | no module-level `memory_collection`; lazy `get_collection()`/`get_embeddings()` instead, so importing the module stays cheap and testable |
+| C2 `memory_worker.py` | DONE | the C2.5 batching "fast-follow" shipped in the same change (`MAX_BATCH = 5`) |
+| C3 `distill_knowledge` enqueues | DONE | |
+| C4 graceful shutdown | DONE | `shutdown()` before `_vault_save()` in `main()` |
+| C5 `/health` + `/info` queue metrics | DONE | queue depth and dropped-job count |
+| C6 `remember`/`recall`/`/save` stay sync | DONE | |
+| C7 `supabase_sync.py` lookup | DONE | prefers `components.memory_store`, uses `store_memories_batch`; old `__main__` lookup kept as fallback |
+| C8 Track C tests | DONE (deviation) | functional / non-blocking / backpressure / concurrent read-write / shutdown-drain automated; step 6 (manual soak under real LLM latency) still OPEN |
+
+**Rollback deviation:** the plan's Track C rollback called for keeping the synchronous
+distillation path behind an `AGENT_ASYNC_DISTILL` flag for one release cycle. That flag was
+**not** implemented — the synchronous path was removed outright, so rolling back Track C
+means reverting the commit. The `_write_lock` scope also stayed write-only: the concurrent
+read-during-write test passed, so C1's contingency (widening the lock to reads) was not needed.
+
+### Follow-on work not in this plan
+
+- Proprietary `LICENSE` + `CONTRIBUTING.md` + README/pyproject updates — [#14](https://github.com/mcashdevel-ux/langbot/pull/14).
+- Optional config file `components/config.py` (`langbot.config.json`, defaults preserved when
+  absent) — [#15](https://github.com/mcashdevel-ux/langbot/pull/15). Several constants this
+  plan introduced as literals (`SCRATCH_SAVE_CHARS`, `READ_INLINE_CHARS`,
+  `GREP_INLINE_LINES`, `MANYFILES_INLINE_CHARS`, `MAX_QUEUE_SIZE`, `MAX_BATCH`, the shutdown
+  timeout) are now read from that file, falling back to the values written below.
+
+### Remaining open items
+
+1. A7.4 — replay the dogfooding transcript against a live LLM server and confirm the second
+   answer reflects more than 5 matches.
+2. B3.3 — watch the duplicate-answer warning in real use and root-cause it (graph re-entry vs.
+   the LLM server returning two completions); the guard stays regardless.
+3. C8.6 — soak a long tool-heavy session and confirm `/health`'s queue depth drains between
+   turns under real LLM latency.
+
+---
+
 ## Files touched — summary
 
 | File | Track A | Track B | Track C |
 |---|---|---|---|
 | `components/scratch.py` *(new)* | created | | |
+| `components/routing.py` *(new, beyond plan)* | | created | |
 | `components/web_tools.py` | modified | | |
 | `components/code_search.py` | modified | | |
 | `components/file_ops.py` | modified | | |
@@ -30,6 +89,9 @@ restructures further.
 
 ## Track A — Scratch Registry Unification
 
+**Status: DONE** (`27537ed`, [#14](https://github.com/mcashdevel-ux/langbot/pull/14)) — except
+the manual repro in A7.4.
+
 **Why this track exists:** `web_tools.py` and `tasks.py` already solve "don't blow
 the context window on one tool result" via an on-disk store + preview + on-demand
 paging. `file_ops.py` and `code_search.py` never adopted that pattern, so
@@ -38,6 +100,12 @@ results straight into the message thread. This track makes the pattern shared
 infrastructure and applies it to the two tools that skip it.
 
 ### Step A1 — Extract the scratch store into its own module
+
+> **Status: DONE (deviation).** `components/scratch.py` exists with all five symbols moved.
+> The `max_bytes` default is the named constant `SCRATCH_SAVE_CHARS` (200,000) rather than an
+> inline literal, and it now reads `tools.scratch_save_chars` from the optional config file
+> ([#15](https://github.com/mcashdevel-ux/langbot/pull/15)) with 200,000 as the fallback, so
+> the module depends on `os`, `uuid`, and `.config` (itself dependency-free).
 
 **Goal / purpose.** `save_to_scratch` / `read_scratch` / `SCRATCH_DIR` currently
 live inside `web_tools.py`. `code_search.py` and `file_ops.py` need the same
@@ -189,6 +257,11 @@ results exist or how to page through them.
 
 ### Step A7 — Testing for Track A
 
+> **Status: DONE (deviation).** Steps 1–3 are automated in `tests/test_code_search.py`,
+> `tests/test_file_ops.py`, and `tests/test_scratch.py` (plus `tests/test_web_tools.py` for the
+> preserved 20,000-char web cap). **Step 4 is OPEN** — no local OpenAI-compatible LLM server was
+> available, so the dogfooding transcript was never replayed end to end.
+
 **Goal / purpose.** Confirm the fix actually changes behavior for the exact case
 that exposed the bug, and confirm nothing regresses for small results.
 
@@ -211,6 +284,12 @@ that exposed the bug, and confirm nothing regresses for small results.
 
 ## Track B — Duplicate-Answer Guard
 
+**Status: DONE** (`27537ed`) — the guard, diagnostics, and tests shipped; the root-cause
+investigation in B3.3 is still OPEN. Beyond the plan, routing was extracted into a new
+`components/routing.py` (so it is unit-testable without importing `langbot.py`) and
+`_stream_turn` also suppresses a duplicate no-tool-call answer at render time, so the second
+panel cannot appear even if a duplicate is generated upstream of `route_agent`.
+
 **Why this track exists:** the dogfooding transcript showed two separate
 "💬 Answer" panels rendered for one human turn — wasted tokens and a confusing
 transcript. Root cause is not fully isolated (possibly the permission-phrase
@@ -219,6 +298,10 @@ is a structural invariant rather than a point patch: at most one no-tool-call AI
 message reaches `distill`/`END` per human turn.
 
 ### Step B1 — Add a turn-scoped "already answered" helper
+
+> **Status: DONE (deviation).** Implemented as `final_answers_since_human` in
+> `components/routing.py` (alongside the relocated `ai_turns_since_human`), not in
+> `langbot.py`. Body is as written below.
 
 **Goal / purpose.** `route_agent` needs to know, before deciding to nudge or to
 finalize, whether a final (non-tool-call) AI message has *already* been produced
@@ -280,6 +363,11 @@ it does not block the first legitimate answer.
 
 ### Step B3 — Add diagnostics for root-causing the duplicate
 
+> **Status: DONE (deviation).** Sub-steps 1 and 2 shipped (guard warning with content preview;
+> DEBUG-gated `(node, message types)` trace in `_stream_turn`). **Sub-step 3 is OPEN** — the
+> logs have not been observed in real use yet, so the root cause is still unknown and the guard
+> remains the only mitigation.
+
 **Goal / purpose.** The guard in B2 hides the symptom; this step preserves the
 ability to find and fix the actual cause later without re-instrumenting from
 scratch.
@@ -314,6 +402,10 @@ scratch.
 
 ## Track C — Background Knowledge Extraction + Embedding
 
+**Status: DONE** (`27537ed`) — including the C2.5 batching fast-follow, which shipped in the
+same change rather than later. The `AGENT_ASYNC_DISTILL` rollback flag from the rollback plan
+was **not** implemented. The manual soak in C8.6 is still OPEN.
+
 **Why this track exists:** `distill_knowledge` currently runs synchronously as
 the last node before `END` — one extra LLM round-trip plus per-fact embedding
 and ChromaDB writes, all blocking the REPL from returning control. Moving this
@@ -321,6 +413,14 @@ off the critical path removes that latency from every tool-using turn, and lets
 embedding calls be batched instead of issued one-by-one.
 
 ### Step C1 — Extract shared memory state into `memory_store.py`
+
+> **Status: DONE (deviation).** `components/memory_store.py` owns the client, collection,
+> embeddings, `_write_lock`, `store_memory`, `store_memories_batch`, `recall_memories`, and
+> `count`. The canonical collection is **not** a module-level `memory_collection` global as
+> sketched below: it is created lazily by `get_collection()` (embeddings likewise via
+> `get_embeddings()`, warmed once at startup from `langbot.py`), so importing the module does
+> not touch disk or load a model — which is what makes the unit tests possible. Callers that
+> the plan expected to import `memory_collection` call `get_collection()` instead.
 
 **Goal / purpose.** Today `chroma_client`, `memory_collection`, `embeddings`,
 `_store_memory`, and `_recall_memories` are module-level state inside
@@ -552,6 +652,10 @@ that dies with the process the instant `main()` returns, mid-job or not.
 
 ### Step C5 — Expose queue health via `/health` and `/info`
 
+> **Status: DONE.** `/health` shows memory count, queue depth, dropped jobs, vault credentials,
+> and background tasks; `/info` shows memory count and queue depth. (A separate `/config`
+> command was added later in [#15](https://github.com/mcashdevel-ux/langbot/pull/15).)
+
 **Goal / purpose.** With distillation now asynchronous, there's no more
 inline confirmation that a fact was stored — operators/users need a way to see
 queue depth and whether jobs are being dropped, otherwise a stuck or overloaded
@@ -610,6 +714,11 @@ in-memory instance and the write lock from Step C1.
 
 ### Step C8 — Testing and concurrency validation for Track C
 
+> **Status: DONE (deviation).** Sub-steps 1–5 are automated in `tests/test_memory_worker.py`
+> and `tests/test_memory_store.py` (real temporary Chroma collection + deterministic fake
+> embedder). Sub-step 4 passed with the write-only lock, so the lock scope was left as-is.
+> **Sub-step 6 (manual soak) is OPEN.**
+
 **Goal / purpose.** This track introduces a background thread touching shared
 state — the highest-risk change of the three tracks — so it needs targeted
 concurrency testing, not just functional testing.
@@ -644,6 +753,10 @@ concurrency testing, not just functional testing.
 
 ## Rollout order and dependency notes
 
+> **Status: not followed.** All three tracks were implemented and landed in a single commit
+> (`27537ed`) in one PR, with the full suite green, rather than staged A → B → C across
+> separate merges.
+
 1. **Track A** first — self-contained, no shared-state risk, directly fixes an
    observed bug. Land and verify via Step A7 before touching anything else.
 2. **Track B** can land in parallel with A (touches only `route_agent`) — verify
@@ -655,6 +768,10 @@ concurrency testing, not just functional testing.
    stable base rather than concurrently with other `langbot.py` edits.
 
 ## Rollback plan
+
+> **Status: partially applicable.** A and B are still straight reverts. For C, the
+> `AGENT_ASYNC_DISTILL` feature flag below was **not** implemented — the synchronous
+> distillation path was deleted, so rolling Track C back means reverting the commit.
 
 - **Track A:** each of A3/A4/A5 is an isolated function-body change with a clear
   before/after; revert is a straight `git revert` per commit, no data migration
