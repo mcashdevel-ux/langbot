@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Terminal-based, tool-using AI agent built on LangGraph + LangChain."
 readme = "README.md"
 requires-python = ">=3.10"
+license = { file = "LICENSE" }
+classifiers = ["License :: Other/Proprietary License"]
 dependencies = [
     "langchain-core",
     "langchain-openai",

@@ -9,13 +9,24 @@ long-term memory (Chroma + sentence-transformers).
 > is prompted to act without asking. Only run it in a trusted, single-user, sandboxed
 > environment. See "Security notes" below.
 
+> 📄 **Proprietary software.** All rights reserved — see [`LICENSE`](./LICENSE). Use requires
+> written permission from the copyright holder. Contributions are welcome under the terms in
+> [`CONTRIBUTING.md`](./CONTRIBUTING.md).
+
 ## Features
 
 - **Autonomous agent loop** (`langbot.py`) — LangGraph `StateGraph` with an agent node, a
   `ToolNode`, and an automatic knowledge-distillation node that extracts durable facts
-  from each exchange into long-term memory.
+  from each exchange into long-term memory. Distillation is handed to a background
+  worker (`components/memory_worker.py`), so it never blocks the REPL from returning;
+  `/health` shows its queue depth and dropped-job count.
 - **Long-term memory** — Chroma vector store (`agent_memory_chroma/`) with
-  `remember` / `recall` tools plus automatic distillation.
+  `remember` / `recall` tools plus automatic distillation, all behind
+  `components/memory_store.py`.
+- **Context-cheap tool results** (`components/scratch.py`) — every tool that can return a
+  large payload (page fetches, file reads, grep hits) saves the full result to an on-disk
+  scratchpad and returns a short preview plus a `scratch:id`; `read_scratch` pages through
+  the rest, so nothing is silently truncated and nothing large is force-fed into context.
 - **File & code tools** (`components/file_ops.py`, `components/code_search.py`) — hardened
   `read_any_file`/`write_any_file` (binary detection, idempotent writes), surgical
   `patch_file`/`batch_patch` (find/replace with `.py` syntax-check + auto-rollback),
@@ -24,9 +35,8 @@ long-term memory (Chroma + sentence-transformers).
   watchers) with `task_start` and actively manage them via `task_list`/`task_status`/
   `task_output`/`task_kill`; output is captured to `./memory/agent_tasks` and a monitor
   thread updates each task's status the moment it exits.
-- **Web tools** (`components/web_tools.py`) — `search_web` and `fetch_url` (via Jina Reader)
-  that save full payloads to an on-disk scratchpad and return short, context-cheap previews;
-  `read_scratch` pages through the rest.
+- **Web tools** (`components/web_tools.py`) — `search_web` and `fetch_url` (via Jina Reader),
+  scratchpad-backed like the file and search tools.
 - **SearXNG engine adapter** (`components/engines.py`) — runs individual SearXNG engine
   modules directly (no SearXNG web app), supporting many search engines.
 - **Conversation persistence** — LangGraph SQLite checkpointer when
@@ -82,14 +92,16 @@ Edit the constants at the top of `langbot.py`:
 | `BASE_URL` | `http://127.0.0.1:8080/v1` | OpenAI-compatible LLM endpoint |
 | `LLM_MODEL` | `local-model` | Model name sent to the endpoint |
 | `SQLITE_DB_PATH` | `./memory/agent_checkpoints.db` | Conversation checkpoint DB |
-| `CHROMA_PERSIST_DIR` | `./agent_memory_chroma` | Long-term memory store |
+| `CHROMA_PERSIST_DIR` | `./memory/agent_memory_chroma` | Long-term memory store (`components/memory_store.py`) |
 
 Environment variables:
 
 - `SEARXNG_SETTINGS_PATH` — path to a SearXNG `settings.yml` (defaults to
   `/etc/searxng/settings.yml`, then the source's bundled settings).
-- `AGENT_SCRATCH_DIR` — where web scratch files are written (default
+- `AGENT_SCRATCH_DIR` — where scratch files are written (default
   `./memory/agent_scratch`, per `MEMORY_POLICY.md`).
+- `AGENT_CHROMA_DIR` — where the long-term memory store lives (default
+  `./memory/agent_memory_chroma`).
 - `AGENT_TASKS_DIR` — where background task logs are written (default
   `./memory/agent_tasks`).
 - `LANGBOT_VAULT_PASSWORD` — if set, the vault master key is wrapped with a
@@ -150,13 +162,20 @@ components/
   file_ops.py           # read/write/patch/batch_patch/git_diff file tools
   code_search.py        # find_in_files / read_many_files / glob_list
   tasks.py              # background task manager (start/list/status/output/kill)
-  web_tools.py          # search_web / fetch_url / read_scratch (scratchpad-backed)
+  scratch.py            # shared on-disk scratchpad + read_scratch paging
+  memory_store.py       # embeddings + Chroma collection (store/recall, write lock)
+  memory_worker.py      # background distillation queue (off the graph's critical path)
+  routing.py            # agent routing, autonomy nudges, duplicate-answer guard
+  web_tools.py          # search_web / fetch_url (scratchpad-backed)
   engines.py            # SearXNG engine adapter used by web_tools
   vault.py              # AES-256-GCM credential vault (the `vault` tool + env auto-load + redaction)
   input.py              # readline input UX used by the REPL
   console.py            # terminal UI helpers used by the REPL
   utils.py              # shared helpers (atomic JSON writes, truncation)
 CODE_REVIEW.md          # review of the initial commit with known issues + fixes
+MEMORY_POLICY.md        # where persistent state may live (./memory/ only)
+CONTRIBUTING.md         # how to contribute + where help is wanted
+LICENSE                 # proprietary license
 ```
 
 ## Known issues
@@ -164,3 +183,16 @@ CODE_REVIEW.md          # review of the initial commit with known issues + fixes
 See [`CODE_REVIEW.md`](./CODE_REVIEW.md) for the original review. Several items have since
 been addressed (console 3.12 import break, vault AES-GCM migration + `0600` perms, active
 output redaction, `read_scratch` handling).
+
+## Contributing
+
+Contributions are welcome — see [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the development
+setup, ground rules, and the areas where help is most wanted (new tools, SearXNG engine
+adapters, memory quality, local-model prompt tuning, terminal UX, sandboxing, docs and
+tests). Opening a pull request means agreeing to the contribution terms in the license.
+
+## License
+
+Proprietary — Copyright (c) 2026 mcashdevel-ux, all rights reserved. See
+[`LICENSE`](./LICENSE); use outside a written agreement with the copyright holder is not
+permitted. Third-party dependencies remain under their own licenses.
