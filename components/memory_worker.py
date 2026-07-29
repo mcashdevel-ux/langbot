@@ -18,14 +18,16 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+from .config import config
 from .utils import strip_code_fences
 
 logger = logging.getLogger(__name__)
 
-MAX_QUEUE_SIZE = 50
+MAX_QUEUE_SIZE = config.get("memory.worker_queue_size", 50)
 # Jobs merged into one embedding/write batch. Distillation is still one LLM call
 # per job; only the store is batched.
-MAX_BATCH = 5
+MAX_BATCH = config.get("memory.worker_batch_size", 5)
+SHUTDOWN_TIMEOUT = config.get("memory.worker_shutdown_timeout", 10.0)
 
 
 @dataclass
@@ -149,7 +151,7 @@ class MemoryWorker:
 
     # ── Lifecycle ──
 
-    def shutdown(self, timeout: float = 10.0) -> None:
+    def shutdown(self, timeout: float = SHUTDOWN_TIMEOUT) -> None:
         """Drain remaining jobs (bounded wait), then stop the thread.
 
         The bound matters more than completeness: losing the last turn's facts on
