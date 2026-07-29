@@ -4,7 +4,8 @@ Ported and adapted from sage-std/core/tools/{files,patches}.py into langbot's
 dependency-light style. All functions are pure (return a status/result string)
 so they can be unit-tested without importing the heavy top-level agent module.
 
-- ``read_file``  — text read with binary detection and truncation.
+- ``read_file``  — text read with binary detection; large files are previewed
+  inline and saved whole to the scratchpad for paging.
 - ``write_file`` — idempotent write with non-string content coercion.
 - ``patch_file`` — surgical find/replace with .py syntax-check + auto-rollback.
 - ``batch_patch``— apply many patches in one call (tolerant of sloppy input).
@@ -15,7 +16,13 @@ import json
 import os
 import subprocess
 
+from .config import config
+from .scratch import save_to_scratch
 from .utils import truncate
+
+# How much of a text file goes inline into the model's context; the rest stays
+# reachable via read_scratch (same pattern web_tools uses for fetched pages).
+READ_INLINE_CHARS = config.get("tools.read_inline_chars", 1500)
 
 
 def _format_size(size_bytes: float) -> str:
@@ -31,7 +38,9 @@ def read_file(file_path: str) -> str:
     """Read a text file, detecting binary files instead of dumping their bytes.
 
     Binary files (NUL byte in the first 8 KB) are reported by name and size
-    rather than decoded into the model's context. Text output is truncated.
+    rather than decoded into the model's context. Text longer than
+    ``READ_INLINE_CHARS`` is previewed inline, with the full content saved to
+    scratch and reachable via ``read_scratch``.
     """
     if not file_path:
         return "Error: empty file path."
@@ -55,7 +64,12 @@ def read_file(file_path: str) -> str:
         return f"Failed to read {file_path}: {e}"
     if not content:
         return "(empty file)"
-    return truncate(content)
+    if len(content) <= READ_INLINE_CHARS:
+        return content
+    sid = save_to_scratch(content, prefix="file")
+    return (f"{os.path.basename(path)} — {len(content)} chars, showing first "
+            f"{READ_INLINE_CHARS} (full file at scratch:{sid}):\n"
+            f"{content[:READ_INLINE_CHARS]}")
 
 
 def _coerce_content(content) -> str:

@@ -1,91 +1,15 @@
-"""Unit tests for web_tools.py — scratchpad storage + search/fetch wrappers.
+"""Unit tests for web_tools.py — search/fetch wrappers.
 
 Network is never touched: ``engines.search_engine`` and ``requests.get`` are
-monkeypatched. ``SCRATCH_DIR`` is redirected to a temp directory.
+monkeypatched. The shared scratchpad is redirected to a temp directory by the
+autouse fixture in ``tests/conftest.py``, and covered by ``test_scratch.py``.
 """
 
 import json
 import os
 
-import pytest
-
+import components.scratch as scratch
 import components.web_tools as web_tools
-
-
-@pytest.fixture(autouse=True)
-def scratch_dir(tmp_path, monkeypatch):
-    d = tmp_path / "scratch"
-    d.mkdir()
-    monkeypatch.setattr(web_tools, "SCRATCH_DIR", str(d))
-    return d
-
-
-# ---------------------------------------------------------------------------
-# Scratch storage
-# ---------------------------------------------------------------------------
-
-class TestScratch:
-    def test_new_scratch_id_prefix(self):
-        sid = web_tools._new_scratch_id("doc")
-        assert sid.startswith("doc_")
-        assert len(sid.split("_")[1]) == 8
-
-    def test_save_and_read_roundtrip(self):
-        sid = web_tools.save_to_scratch("hello world", prefix="t")
-        out = web_tools.read_scratch(sid)
-        assert "hello world" in out
-        assert sid in out
-
-    def test_save_truncates_at_cap(self, monkeypatch):
-        monkeypatch.setattr(web_tools, "FETCH_SAVE_CHARS", 10)
-        sid = web_tools.save_to_scratch("x" * 100)
-        path = os.path.join(web_tools.SCRATCH_DIR, f"{sid}.txt")
-        assert os.path.getsize(path) == 10
-
-    def test_read_missing_id(self):
-        out = web_tools.read_scratch("nope_12345678")
-        assert "no scratch entry found" in out
-
-    def test_read_paging_reports_more(self):
-        sid = web_tools.save_to_scratch("A" * 1000)
-        out = web_tools.read_scratch(sid, offset=0, length=100)
-        assert "more available" in out
-        assert "offset=100" in out
-
-    def test_read_offset_no_more_at_end(self):
-        sid = web_tools.save_to_scratch("short content")
-        out = web_tools.read_scratch(sid, offset=0, length=1000)
-        assert "more available" not in out
-
-    def test_read_negative_offset_clamped(self):
-        sid = web_tools.save_to_scratch("data here")
-        out = web_tools.read_scratch(sid, offset=-50)
-        assert "data here" in out
-
-    def test_read_non_ascii_byte_offsets_consistent(self):
-        # Multi-byte content: offsets/total are byte-based and consistent, and
-        # a chunk boundary must not corrupt output or over-report "more".
-        content = "café-\u00e9\u00e9\u00e9" * 50  # 'é' is 2 bytes in UTF-8
-        sid = web_tools.save_to_scratch(content)
-        total_bytes = len(content.encode("utf-8"))
-        out = web_tools.read_scratch(sid, offset=0, length=total_bytes)
-        assert f"/{total_bytes}]" in out
-        assert "more available" not in out
-        # Reassemble via paging and confirm it round-trips exactly.
-        reassembled = ""
-        offset = 0
-        while True:
-            page = web_tools.read_scratch(sid, offset=offset, length=7)
-            body = page.split("\n", 1)[1]
-            if body.endswith(")"):
-                body = body.rsplit("\n...", 1)[0]
-            reassembled += body
-            marker = page.split("]", 1)[0]
-            end = int(marker.split("-")[1].split("/")[0])
-            if "more available" not in page:
-                break
-            offset = end
-        assert reassembled == content
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +66,7 @@ class TestSearchWeb:
         out = web_tools.search_web("q")
         # scratch file has the full payload, inline snippet is capped.
         sid = out.split("scratch:")[1].split(")")[0]
-        saved = json.loads(open(os.path.join(web_tools.SCRATCH_DIR, f"{sid}.txt")).read())
+        saved = json.loads(open(os.path.join(scratch.SCRATCH_DIR, f"{sid}.txt")).read())
         assert saved[0]["content"] == long_content
 
 
@@ -186,6 +110,16 @@ class TestFetchUrl:
         out = web_tools.fetch_url("http://x")
         assert "short page" in out
         assert "truncated" not in out
+
+    def test_fetch_save_cap_still_applies(self, monkeypatch):
+        # The on-disk cap for fetched pages is unchanged by the move to
+        # scratch.py's larger default.
+        big = "q" * (web_tools.FETCH_SAVE_CHARS + 1000)
+        monkeypatch.setattr(web_tools.requests, "get", lambda url, **k: _FakeResp(big))
+        out = web_tools.fetch_url("http://x")
+        sid = out.split("scratch:")[1].split(" ")[0]
+        path = os.path.join(scratch.SCRATCH_DIR, f"{sid}.txt")
+        assert os.path.getsize(path) == web_tools.FETCH_SAVE_CHARS
 
     def test_long_content_truncated_and_saved(self, monkeypatch):
         big = "q" * (web_tools.FETCH_INLINE_CHARS + 500)

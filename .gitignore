@@ -29,6 +29,9 @@ agent_checkpoints.db-*
 agent_memory_chroma/
 .sage_history
 
+# Local config (langbot.config.example.json is the tracked template)
+langbot.config.json
+
 # Scratch files
 agent_scratch/
 /tmp/agent_scratch/
