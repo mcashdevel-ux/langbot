@@ -12,6 +12,8 @@ import logging
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from .config import config
+
 logger = logging.getLogger(__name__)
 
 # Phrases that indicate the model is asking for permission instead of acting.
@@ -52,7 +54,7 @@ TOOL_AVOIDANCE_PATTERNS = (
 )
 
 # Nudge re-tries allowed per human turn before the loop gives up and finalizes.
-MAX_NUDGES_PER_TURN = 5
+MAX_NUDGES_PER_TURN = config.get("routing.max_nudges_per_turn", 5)
 
 NUDGE_PERMISSION = (
     "[AUTONOMOUS AGENT DIRECTIVE]: You just asked for permission or confirmation instead of acting. "
