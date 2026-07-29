@@ -16,12 +16,13 @@ import json
 import os
 import subprocess
 
+from .config import config
 from .scratch import save_to_scratch
 from .utils import truncate
 
 # How much of a text file goes inline into the model's context; the rest stays
 # reachable via read_scratch (same pattern web_tools uses for fetched pages).
-READ_INLINE_CHARS = 1500
+READ_INLINE_CHARS = config.get("tools.read_inline_chars", 1500)
 
 
 def _format_size(size_bytes: float) -> str:

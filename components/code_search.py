@@ -9,14 +9,15 @@ import glob as _glob
 import os
 import subprocess
 
+from .config import config
 from .scratch import save_to_scratch
 from .utils import truncate
 
 # Matches shown inline; larger result sets are saved whole to scratch and paged
 # through with read_scratch.
-GREP_INLINE_LINES = 20
+GREP_INLINE_LINES = config.get("tools.grep_inline_lines", 20)
 # Inline cap for read_many_files; the full concatenation goes to scratch.
-MANYFILES_INLINE_CHARS = 4000
+MANYFILES_INLINE_CHARS = config.get("tools.manyfiles_inline_chars", 4000)
 
 
 def _format_matches(pattern: str, lines: list[str]) -> str:
