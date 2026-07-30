@@ -114,6 +114,7 @@ Precedence for a single setting: **environment variable > config file > default.
 | `tools` | `read_inline_chars`, `grep_inline_lines`, `manyfiles_inline_chars`, `scratch_save_chars`, `max_output_chars` | how much tool output goes inline vs. to scratch |
 | `web` | `search_snippet_chars`, `search_max_results`, `fetch_inline_chars`, `fetch_save_chars`, `jina_timeout`, `jina_retry_on_429`, `searxng_settings_path`, `searxng_source_dir` | search/fetch behaviour |
 | `routing` | `max_nudges_per_turn` | autonomy nudge budget per turn |
+| `compat` | `repair_json_tool_calls`, `repair_max_candidates` | recover tool calls from models that print them as text (see below) |
 
 See [`langbot.config.example.json`](./langbot.config.example.json) for every key with its
 default value.
@@ -170,6 +171,23 @@ python -m pytest
 `task_status`, `task_output`, `task_kill`, `search_web`, `fetch_url`, `read_scratch`,
 `remember`, `recall`, `vault`.
 
+### Weak / fine-tuned local models
+
+Some small models (and LoRA fine-tunes) ignore the tool-calling channel and print the
+call into the answer instead:
+
+```json
+{"content": "Analyzing the current working directory.",
+ "tool_calls": [{"name": "glob_list", "args": {"pattern": "."}}]}
+```
+
+langbot detects that, converts it into real tool calls, and executes them, logging a
+warning each time (`tool_call_repair: model emitted N tool call(s) as text ...`). The
+repair only fires when the message has no native tool calls and the tool name is actually
+registered, so ordinary answers that merely discuss JSON are untouched. Set
+`compat.repair_json_tool_calls` to `false` to see the raw output instead — a stream of
+those warnings is a good signal to fix the model's chat template or prompt format.
+
 ## Security notes
 
 - The agent can run **arbitrary shell commands** and read/write **any file**. Treat it as
@@ -188,6 +206,7 @@ components/
   code_search.py        # find_in_files / read_many_files / glob_list
   tasks.py              # background task manager (start/list/status/output/kill)
   config.py             # optional config file (langbot.config.json) with default fallbacks
+  tool_call_repair.py   # recovers tool calls from models that emit them as text
   scratch.py            # shared on-disk scratchpad + read_scratch paging
   memory_store.py       # embeddings + Chroma collection (store/recall, write lock)
   memory_worker.py      # background distillation queue (off the graph's critical path)
