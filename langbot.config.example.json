@@ -46,5 +46,10 @@
 
   "routing": {
     "max_nudges_per_turn": 5
+  },
+
+  "compat": {
+    "repair_json_tool_calls": true,
+    "repair_max_candidates": 20
   }
 }
