@@ -65,6 +65,7 @@ from components import (
     web_tools as _web_tools,
 )
 from components.routing import nudge_agent, route_agent
+from components.tool_call_repair import repair_message
 
 import components.console as ui
 from components.input import read_input, setup_readline
@@ -285,6 +286,7 @@ tools = [
     remember, recall, vault,
 ]
 llm_with_tools = llm.bind_tools(tools)
+_TOOL_NAMES = {t.name for t in tools}
 
 # ------------------------------------------------------------------------------
 # 4. System Prompt (autonomy + memory)
@@ -306,6 +308,9 @@ system_prompt = SystemMessage(content=(
 def agent(state: MessagesState):
     messages = [system_prompt] + state["messages"]
     response = llm_with_tools.invoke(messages)
+    # Small local models often print the call they meant to make instead of
+    # using the tool-calling channel; recover those so they actually execute.
+    repair_message(response, _TOOL_NAMES)
     return {"messages": [response]}
 
 # ------------------------------------------------------------------------------
