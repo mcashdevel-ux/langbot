@@ -14,12 +14,13 @@ has no LangGraph coupling and is testable in isolation.
 import json
 import logging
 import queue
+import re
 import threading
 import time
 from dataclasses import dataclass, field
 
 from .config import config
-from .tool_call_repair import unwrap_payload
+from .tool_call_repair import unwrap_content
 from .utils import strip_code_fences
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,90 @@ Return ONLY a JSON array of strings, each a standalone factual statement grounde
 the tool results above. If nothing is clearly supported by evidence, return [].
 Do not include explanations, markdown, or extra text.
 """
+
+
+_BULLET_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+(.*\S)\s*$")
+# Keys a model may hide the fact list under when it wraps the array in an object.
+_LIST_KEYS = ("facts", "memories", "content", "items", "results", "data", "knowledge")
+_ARRAY_RE = re.compile(r"\[.*?\]", re.DOTALL)
+
+
+def _strings(items) -> "list[str] | None":
+    """Coerce a list of facts to clean strings, accepting {"fact": "..."} entries."""
+    out = []
+    for item in items:
+        if isinstance(item, str):
+            text = item
+        elif isinstance(item, dict):
+            text = next(
+                (item[k] for k in ("fact", "text", "statement", "content")
+                 if isinstance(item.get(k), str)),
+                None,
+            )
+            if text is None:
+                return None
+        else:
+            return None
+        text = text.strip()
+        if text:
+            out.append(text)
+    return out
+
+
+def parse_facts(raw, _depth: int = 0) -> "list[str] | None":
+    """Read a fact list out of the distiller's output, or None if unreadable.
+
+    The prompt asks for a bare JSON array of strings, but small local models
+    return it wrapped in a chat envelope, nested under an object key, as objects
+    instead of strings, embedded in prose, or as a Markdown bullet list. Since a
+    miss silently loses the whole turn's knowledge, every one of those shapes is
+    accepted. An empty list is a valid answer ("nothing worth storing") and is
+    distinct from None ("could not read this at all").
+    """
+    if not isinstance(raw, str) or _depth > 3:
+        return None
+    text = strip_code_fences(raw.strip())
+    # A chat envelope may itself contain fences/JSON, hence the recursion.
+    inner = unwrap_content(text)
+    if inner is not None:
+        return parse_facts(inner, _depth + 1)
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = None
+
+    if isinstance(parsed, list):
+        return _strings(parsed)
+    if isinstance(parsed, dict):
+        for key in _LIST_KEYS:
+            value = parsed.get(key)
+            if isinstance(value, list):
+                return _strings(value)
+            if isinstance(value, str):
+                return parse_facts(value, _depth + 1)
+        # Any other single list value, e.g. {"extracted_facts": [...]}.
+        lists = [v for v in parsed.values() if isinstance(v, list)]
+        if len(lists) == 1:
+            return _strings(lists[0])
+        return None
+    if isinstance(parsed, str):
+        return parse_facts(parsed, _depth + 1)
+
+    # Not JSON as a whole: an array embedded in prose, else a bullet list.
+    match = _ARRAY_RE.search(text)
+    if match:
+        try:
+            embedded = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            embedded = None
+        if isinstance(embedded, list):
+            return _strings(embedded)
+    bullets = [m.group(1) for m in (_BULLET_RE.match(ln) for ln in text.splitlines()) if m]
+    if bullets:
+        logger.debug("memory_worker: read %d fact(s) from a bullet list", len(bullets))
+        return bullets
+    return None
 
 
 class MemoryWorker:
@@ -137,27 +222,18 @@ class MemoryWorker:
         store_fn(facts)
 
     def _distill(self, job: DistillJob) -> "list[str]":
-        try:
-            raw = strip_code_fences(self._llm.invoke(_distillation_prompt(job)).content.strip())
-            # Models that wrap answers in a chat envelope wrap the fact array too.
-            raw = strip_code_fences(unwrap_payload(raw).strip())
-            facts = json.loads(raw)
-        except json.JSONDecodeError as e:
+        raw = self._llm.invoke(_distillation_prompt(job)).content
+        facts = parse_facts(raw)
+        if facts is None:
+            # Log the output itself: the shape a given model emits is the only
+            # way to tell a prompt/template problem from a parser gap.
             logger.warning(
-                "memory_worker: distillation skipped, model output was not JSON: %s", e
+                "memory_worker: distillation skipped, could not read a fact list from "
+                "model output: %r",
+                (raw if isinstance(raw, str) else str(raw))[:300],
             )
             return []
-        if isinstance(facts, dict):
-            # e.g. {"content": ["fact", ...]} or {"facts": [...]} from a model
-            # that insists on an object at the top level.
-            for key in ("content", "facts", "memories"):
-                if isinstance(facts.get(key), list):
-                    facts = facts[key]
-                    break
-        if not isinstance(facts, list):
-            logger.warning("memory_worker: distillation skipped, output was not a JSON array")
-            return []
-        return [f.strip() for f in facts if isinstance(f, str) and f.strip()]
+        return facts
 
     # ── Lifecycle ──
 
