@@ -40,6 +40,12 @@ MAX_CANDIDATES = config.get("compat.repair_max_candidates", 20)
 
 _FENCE_RE = re.compile(r"^```[a-zA-Z0-9_+-]*\s*\n?|\n?```$")
 
+# Keys a chat-envelope object may carry while still being *only* an envelope.
+# Any other key means the object is real data the caller wants verbatim.
+_ENVELOPE_KEYS = frozenset({
+    "content", "tool_calls", "tool_call", "thought", "thoughts", "reasoning",
+})
+
 
 def _strip_fences(text: str) -> str:
     """Drop one leading/trailing Markdown fence, keeping the inner text."""
@@ -168,6 +174,48 @@ def parse_tool_calls(content: str, valid_names) -> "tuple[str, list[dict]]":
     return content, []
 
 
+def unwrap_content(text) -> "str | None":
+    """Unwrap a call-less chat envelope, returning its inner ``content``.
+
+    The same models that emit textual tool calls also wrap plain answers, e.g.
+    ``{"content": "The directory holds 12 files.", "tool_calls": []}``, which
+    would otherwise be rendered to the user as raw JSON.
+
+    Returns None (leave the text alone) unless the whole text is a single JSON
+    object whose keys are all envelope keys, whose ``content`` is a string, and
+    which carries no tool calls — calls mean ``parse_tool_calls`` should handle
+    it instead, and a stray key means the object is real data, not an envelope.
+    """
+    if not text or not isinstance(text, str):
+        return None
+    stripped = _strip_fences(text)
+    if not stripped.startswith("{"):
+        return None
+    try:
+        obj = json.loads(stripped)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(obj, dict) or not set(obj) <= _ENVELOPE_KEYS:
+        return None
+    if obj.get("tool_calls") or obj.get("tool_call"):
+        return None
+    inner = obj.get("content")
+    if not isinstance(inner, str):
+        return None
+    return inner.strip()
+
+
+def unwrap_payload(text: str) -> str:
+    """``unwrap_content`` with a passthrough default, for non-message text.
+
+    Used where the model's raw output is parsed by something other than the
+    graph (e.g. the distiller's JSON fact array arriving wrapped in a chat
+    envelope).
+    """
+    inner = unwrap_content(text)
+    return inner if inner is not None else text
+
+
 def repair_message(message, valid_names) -> bool:
     """Rewrite ``message`` in place if its content hides tool calls.
 
@@ -183,7 +231,13 @@ def repair_message(message, valid_names) -> bool:
         return False
     remaining, calls = parse_tool_calls(content, valid_names)
     if not calls:
-        return False
+        # No calls, but the answer itself may still be wrapped in an envelope.
+        inner = unwrap_content(content)
+        if inner is None:
+            return False
+        logger.debug("tool_call_repair: unwrapped a call-less JSON envelope")
+        message.content = inner
+        return True
     logger.warning(
         "tool_call_repair: model emitted %d tool call(s) as text instead of "
         "native tool calls (%s) — recovered",

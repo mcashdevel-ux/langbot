@@ -7,7 +7,12 @@ The motivating case is a local Qwen LoRA that answered every prompt with
 import pytest
 
 from components import tool_call_repair
-from components.tool_call_repair import parse_tool_calls, repair_message
+from components.tool_call_repair import (
+    parse_tool_calls,
+    repair_message,
+    unwrap_content,
+    unwrap_payload,
+)
 
 NAMES = {"glob_list", "remember", "execute_shell_command", "read_any_file"}
 
@@ -148,6 +153,36 @@ class TestRepairMessage:
         with caplog.at_level("WARNING"):
             repair_message(msg, NAMES)
         assert "glob_list" in caplog.text
+
+
+class TestUnwrapContent:
+    def test_call_less_envelope_is_unwrapped(self):
+        raw = '{"content": "The directory holds 12 files.", "tool_calls": []}'
+        assert unwrap_content(raw) == "The directory holds 12 files."
+
+    def test_fenced_and_thought_bearing_envelope(self):
+        raw = '```json\n{"thought": "listing", "content": "Done.", "tool_calls": []}\n```'
+        assert unwrap_content(raw) == "Done."
+
+    @pytest.mark.parametrize("text", [
+        "A plain answer.",
+        '["a", "json", "array"]',
+        '{"content": "x", "tool_calls": [{"name": "glob_list", "args": {}}]}',  # has calls
+        '{"content": "x", "status": "ok"}',                                     # stray key
+        '{"content": {"nested": 1}, "tool_calls": []}',                         # not a string
+        '{"tool_calls": []}',                                                   # no content
+        "{bad json",
+        "",
+    ])
+    def test_left_alone(self, text):
+        assert unwrap_content(text) is None
+        assert unwrap_payload(text) == text
+
+    def test_repair_message_unwraps_a_call_less_envelope(self):
+        msg = FakeAI('{"content": "I have recalled the greeting.", "tool_calls": []}')
+        assert repair_message(msg, NAMES) is True
+        assert msg.content == "I have recalled the greeting."
+        assert msg.tool_calls == []
 
 
 class TestRoutingIntegration:
