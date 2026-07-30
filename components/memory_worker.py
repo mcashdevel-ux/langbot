@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass, field
 
 from .config import config
-from .tool_call_repair import unwrap_content
+from .tool_call_repair import strip_reasoning, unwrap_content
 from .utils import strip_code_fences
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,8 @@ Assistant response: {job.ai_text}
 Return ONLY a JSON array of strings, each a standalone factual statement grounded in
 the tool results above. If nothing is clearly supported by evidence, return [].
 Do not include explanations, markdown, or extra text.
-"""
+/no_think
+"""  # /no_think disables Qwen3-style reasoning blocks; harmless to other models.
 
 
 _BULLET_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+(.*\S)\s*$")
@@ -103,7 +104,7 @@ def parse_facts(raw, _depth: int = 0) -> "list[str] | None":
     """
     if not isinstance(raw, str) or _depth > 3:
         return None
-    text = strip_code_fences(raw.strip())
+    text = strip_code_fences(strip_reasoning(raw).strip())
     # A chat envelope may itself contain fences/JSON, hence the recursion.
     inner = unwrap_content(text)
     if inner is not None:
