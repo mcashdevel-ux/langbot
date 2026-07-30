@@ -7,7 +7,12 @@ The motivating case is a local Qwen LoRA that answered every prompt with
 import pytest
 
 from components import tool_call_repair
-from components.tool_call_repair import parse_tool_calls, repair_message, unwrap_content
+from components.tool_call_repair import (
+    parse_tool_calls,
+    repair_message,
+    strip_reasoning,
+    unwrap_content,
+)
 
 NAMES = {"glob_list", "remember", "execute_shell_command", "read_any_file"}
 
@@ -81,6 +86,46 @@ class TestParse:
                '"config is {\\"a\\": {\\"b\\": 1}}"}}]}')
         _, calls = parse_tool_calls(raw, NAMES)
         assert calls[0]["args"]["fact"] == 'config is {"a": {"b": 1}}'
+
+
+class TestQwenXmlFormat:
+    """Qwen3's own chat template documents <tool_call>{...}</tool_call> blocks,
+    which arrive as content whenever the server does not parse the tags."""
+
+    def test_single_tag(self):
+        raw = ('Let me check.\n<tool_call>\n{"name": "glob_list", '
+               '"arguments": {"pattern": "*.py"}}\n</tool_call>')
+        content, calls = parse_tool_calls(raw, NAMES)
+        assert content == "Let me check."
+        assert calls[0]["name"] == "glob_list"
+        assert calls[0]["args"] == {"pattern": "*.py"}
+
+    def test_two_tags(self):
+        raw = ('<tool_call>{"name": "remember", "arguments": {"fact": "a"}}</tool_call>'
+               '<tool_call>{"name": "glob_list", "arguments": {"pattern": "."}}</tool_call>')
+        content, calls = parse_tool_calls(raw, NAMES)
+        assert [c["name"] for c in calls] == ["remember", "glob_list"]
+        assert content == ""
+
+    def test_unclosed_tag_from_a_truncated_generation(self):
+        raw = '<tool_call>{"name": "glob_list", "arguments": {"pattern": "."}}'
+        _, calls = parse_tool_calls(raw, NAMES)
+        assert calls[0]["name"] == "glob_list"
+
+    @pytest.mark.parametrize("raw, expected", [
+        ("<think>hmm</think>\nThe answer.", "The answer."),
+        ("<thinking>hmm</thinking>The answer.", "The answer."),
+        ("The answer.<think>cut off mid-thought", "The answer."),
+        ("No reasoning here.", "No reasoning here."),
+    ])
+    def test_strip_reasoning(self, raw, expected):
+        assert strip_reasoning(raw) == expected
+
+    def test_leaked_markup_is_stripped_from_the_answer(self):
+        msg = FakeAI("<tool_response> I have recalled relevant information.<|im_end|>")
+        assert repair_message(msg, NAMES) is True
+        assert msg.content == "I have recalled relevant information."
+        assert msg.tool_calls == []
 
 
 class TestNoFalsePositives:
