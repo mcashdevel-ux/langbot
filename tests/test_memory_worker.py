@@ -11,7 +11,43 @@ import time
 
 import pytest
 
-from components.memory_worker import DistillJob, MemoryWorker
+from components.memory_worker import DistillJob, MemoryWorker, parse_facts
+
+
+class TestParseFacts:
+    """The distiller's output shape varies wildly across small local models, and a
+    parse miss silently loses a whole turn's knowledge."""
+
+    @pytest.mark.parametrize("raw, expected", [
+        ('["a", "b"]', ["a", "b"]),                                    # as prompted
+        ('```json\n["fenced"]\n```', ["fenced"]),
+        ('[]', []),                                                    # nothing to store
+        ('{"content": "[\\"wrapped\\"]", "tool_calls": []}', ["wrapped"]),
+        ('{"content": ["listed"], "tool_calls": []}', ["listed"]),
+        ('{"facts": ["keyed"]}', ["keyed"]),
+        ('{"memories": ["keyed"]}', ["keyed"]),
+        ('{"extracted_facts": ["odd key"]}', ["odd key"]),             # sole list value
+        ('[{"fact": "as object"}]', ["as object"]),
+        ('[{"text": "as object"}]', ["as object"]),
+        ('Here you go:\n["in prose"]\nHope that helps.', ["in prose"]),
+        ("- bullet one\n- bullet two", ["bullet one", "bullet two"]),
+        ("1. numbered\n2) also numbered", ["numbered", "also numbered"]),
+        ('["  padded  ", "", "kept"]', ["padded", "kept"]),
+    ])
+    def test_accepted_shapes(self, raw, expected):
+        assert parse_facts(raw) == expected
+
+    @pytest.mark.parametrize("raw", [
+        "I'm afraid I can't do that",
+        "",
+        None,
+        123,
+        '{"status": "ok"}',                     # object with no list anywhere
+        '{"a": [1], "b": [2]}',                 # ambiguous: two candidate lists
+        '[["nested"], 3]',                      # items are not fact-like
+    ])
+    def test_unreadable_returns_none(self, raw):
+        assert parse_facts(raw) is None
 
 
 class _StubLLM:
