@@ -181,13 +181,24 @@ call into the answer instead:
  "tool_calls": [{"name": "glob_list", "args": {"pattern": "."}}]}
 ```
 
-langbot detects that, converts it into real tool calls, and executes them, logging a
+Qwen-family models use their own text protocol for the same thing, which arrives as
+content whenever the server does not parse the tags:
+
+```
+<tool_call>
+{"name": "glob_list", "arguments": {"pattern": "*.py"}}
+</tool_call>
+```
+
+langbot detects both, converts them into real tool calls, and executes them, logging a
 warning each time (`tool_call_repair: model emitted N tool call(s) as text ...`). The
 repair only fires when the message has no native tool calls and the tool name is actually
 registered, so ordinary answers that merely discuss JSON are untouched. The same models
 wrap plain answers (`{"content": "...", "tool_calls": []}`) and the distiller's fact array
 in that envelope; both are unwrapped as well, so the user sees prose rather than JSON and
-knowledge distillation still works. Set
+knowledge distillation still works. Leaked chat-template markup (`<tool_response>`,
+`<|im_end|>`) is stripped from answers, and `<think>` reasoning blocks are shown as
+Thought panels rather than as part of the answer. Set
 `compat.repair_json_tool_calls` to `false` to see the raw output instead — a stream of
 those warnings is a good signal to fix the model's chat template or prompt format.
 

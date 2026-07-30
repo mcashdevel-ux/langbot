@@ -406,6 +406,8 @@ def _render_message(msg) -> None:
         content = msg.content
         if content:
             text = _vault_redact(content if isinstance(content, str) else str(content))
+            # Qwen-family models put reasoning in <think> blocks; same treatment.
+            text = text.replace("<think>", "<thought>").replace("</think>", "</thought>")
             if "<thought>" in text and "</thought>" in text:
                 parts = text.split("</thought>")
                 thought_part = parts[0].replace("<thought>", "").strip()

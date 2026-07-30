@@ -33,6 +33,9 @@ class TestParseFacts:
         ("- bullet one\n- bullet two", ["bullet one", "bullet two"]),
         ("1. numbered\n2) also numbered", ["numbered", "also numbered"]),
         ('["  padded  ", "", "kept"]', ["padded", "kept"]),
+        # Qwen3 reasoning around the payload, including brackets of its own.
+        ('<think>maybe [a] or [b]?</think>\n["after thinking"]', ["after thinking"]),
+        ('<tool_response>["tagged"]<|im_end|>', ["tagged"]),
     ])
     def test_accepted_shapes(self, raw, expected):
         assert parse_facts(raw) == expected
@@ -45,6 +48,7 @@ class TestParseFacts:
         '{"status": "ok"}',                     # object with no list anywhere
         '{"a": [1], "b": [2]}',                 # ambiguous: two candidate lists
         '[["nested"], 3]',                      # items are not fact-like
+        "<think>only reasoning, cut off mid-thought",
     ])
     def test_unreadable_returns_none(self, raw):
         assert parse_facts(raw) is None

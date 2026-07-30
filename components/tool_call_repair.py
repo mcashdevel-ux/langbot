@@ -46,6 +46,40 @@ _ENVELOPE_KEYS = frozenset({
     "content", "tool_calls", "tool_call", "thought", "thoughts", "reasoning",
 })
 
+# Qwen's own chat template documents calls as <tool_call>{"name":…,"arguments":…}
+# </tool_call>, which a server that does not parse the tags passes through as
+# content. An unclosed tag (truncated generation) still yields the JSON.
+_TOOL_CALL_TAG_RE = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call>|\Z)", re.DOTALL)
+# Chat-template markup that leaks into content when the server does not strip it.
+_MARKUP_RE = re.compile(
+    r"</?tool_call>|</?tool_response>|<\|im_start\|>|<\|im_end\|>|<\|endoftext\|>"
+)
+_BLANK_RUN_RE = re.compile(r"\n{3,}")
+# Qwen3 reasoning blocks. Unclosed means the generation was cut off mid-thought,
+# so everything from the tag on is reasoning.
+_THINK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL)
+_OPEN_THINK_RE = re.compile(r"<think(?:ing)?>.*\Z", re.DOTALL)
+
+
+def _clean_markup(text: str) -> str:
+    """Remove leaked chat-template markup, keeping the prose intact."""
+    return _BLANK_RUN_RE.sub("\n\n", _MARKUP_RE.sub("", text)).strip()
+
+
+def strip_reasoning(text: str) -> str:
+    """Drop ``<think>`` blocks and leaked markup.
+
+    For consumers that need the model's *payload* rather than its narration —
+    the knowledge distiller parses a JSON array, and reasoning text around it
+    (often containing brackets of its own) derails that.
+    """
+    if not isinstance(text, str):
+        return text
+    without = _THINK_RE.sub("", text)
+    if "<think" in without:
+        without = _OPEN_THINK_RE.sub("", without)
+    return _clean_markup(without)
+
 
 def _strip_fences(text: str) -> str:
     """Drop one leading/trailing Markdown fence, keeping the inner text."""
@@ -161,6 +195,17 @@ def parse_tool_calls(content: str, valid_names) -> "tuple[str, list[dict]]":
         return content, []
     valid_names = set(valid_names)
 
+    # Qwen-style <tool_call>{...}</tool_call> blocks first: the tags are that
+    # family's native (text) protocol, so the JSON inside is unambiguous.
+    xml_calls = []
+    remaining_xml = content
+    for match in _TOOL_CALL_TAG_RE.finditer(content):
+        for _, _, obj in _json_objects(match.group(1)):
+            xml_calls.extend(_calls_from_object(obj, valid_names))
+        remaining_xml = remaining_xml.replace(match.group(0), " ")
+    if xml_calls:
+        return _clean_markup(remaining_xml), xml_calls
+
     text = _strip_fences(content)
     for start, end, obj in _json_objects(text):
         calls = _calls_from_object(obj, valid_names)
@@ -206,10 +251,10 @@ def unwrap_content(text) -> "str | None":
 
 
 def repair_message(message, valid_names) -> bool:
-    """Rewrite ``message`` in place if its content hides tool calls.
+    """Rewrite ``message`` in place if its content hides tool calls or markup.
 
-    Returns True when a repair happened. No-ops when the message already has
-    native tool calls, when repair is disabled, or when nothing parses.
+    Returns True when the message was changed. No-ops when it already has native
+    tool calls, when repair is disabled, or when the content is clean prose.
     """
     if not REPAIR_ENABLED:
         return False
@@ -218,20 +263,24 @@ def repair_message(message, valid_names) -> bool:
     content = getattr(message, "content", None)
     if not isinstance(content, str):
         return False
+
     remaining, calls = parse_tool_calls(content, valid_names)
-    if not calls:
-        # No calls, but the answer itself may still be wrapped in an envelope.
-        inner = unwrap_content(content)
-        if inner is None:
-            return False
-        logger.debug("tool_call_repair: unwrapped a call-less JSON envelope")
-        message.content = inner
+    if calls:
+        logger.warning(
+            "tool_call_repair: model emitted %d tool call(s) as text instead of "
+            "native tool calls (%s) — recovered",
+            len(calls), ", ".join(c["name"] for c in calls),
+        )
+        message.content = _clean_markup(remaining)
+        message.tool_calls = calls
         return True
-    logger.warning(
-        "tool_call_repair: model emitted %d tool call(s) as text instead of "
-        "native tool calls (%s) — recovered",
-        len(calls), ", ".join(c["name"] for c in calls),
-    )
-    message.content = remaining
-    message.tool_calls = calls
+
+    # No calls: the answer may still be wrapped in an envelope, or carry leaked
+    # chat-template markup such as <tool_response>.
+    inner = unwrap_content(content)
+    cleaned = _clean_markup(inner if inner is not None else content)
+    if cleaned == content:
+        return False
+    logger.debug("tool_call_repair: cleaned a call-less answer (envelope/markup)")
+    message.content = cleaned
     return True
