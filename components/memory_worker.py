@@ -19,6 +19,7 @@ import time
 from dataclasses import dataclass, field
 
 from .config import config
+from .tool_call_repair import unwrap_payload
 from .utils import strip_code_fences
 
 logger = logging.getLogger(__name__)
@@ -138,12 +139,21 @@ class MemoryWorker:
     def _distill(self, job: DistillJob) -> "list[str]":
         try:
             raw = strip_code_fences(self._llm.invoke(_distillation_prompt(job)).content.strip())
+            # Models that wrap answers in a chat envelope wrap the fact array too.
+            raw = strip_code_fences(unwrap_payload(raw).strip())
             facts = json.loads(raw)
         except json.JSONDecodeError as e:
             logger.warning(
                 "memory_worker: distillation skipped, model output was not JSON: %s", e
             )
             return []
+        if isinstance(facts, dict):
+            # e.g. {"content": ["fact", ...]} or {"facts": [...]} from a model
+            # that insists on an object at the top level.
+            for key in ("content", "facts", "memories"):
+                if isinstance(facts.get(key), list):
+                    facts = facts[key]
+                    break
         if not isinstance(facts, list):
             logger.warning("memory_worker: distillation skipped, output was not a JSON array")
             return []
