@@ -194,7 +194,7 @@ class SupabaseSync:
             try:
                 from . import memory_store as _ms
 
-                _ms.store_memories_batch(facts, timestamps)
+                _ms.store_memories_batch(facts, timestamps, source="supabase")
                 return True
             except Exception as e:
                 logger.warning("supabase_sync: memory_store batch store failed: %s", e)
