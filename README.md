@@ -109,7 +109,8 @@ Precedence for a single setting: **environment variable > config file > default.
 | Section | Keys | Notes |
 |---------|------|-------|
 | `llm` | `base_url`, `model`, `temperature`, `max_retries` | OpenAI-compatible endpoint |
-| `paths` | `checkpoint_db`, `chroma_dir`, `scratch_dir`, `tasks_dir`, `vault_dir` | keep inside `./memory/` per `MEMORY_POLICY.md` |
+| `paths` | `checkpoint_db`, `chroma_dir`, `scratch_dir`, `tasks_dir`, `vault_dir`, `log_file` | keep inside `./memory/` per `MEMORY_POLICY.md` |
+| `logging` | `level`, `console`, `max_bytes`, `backup_count` | log destination and verbosity (see below) |
 | `memory` | `collection_name`, `embedding_model`, `embedding_device`, `worker_queue_size`, `worker_batch_size`, `worker_shutdown_timeout` | background distiller + vector store |
 | `tools` | `read_inline_chars`, `grep_inline_lines`, `manyfiles_inline_chars`, `scratch_save_chars`, `max_output_chars` | how much tool output goes inline vs. to scratch |
 | `web` | `search_snippet_chars`, `search_max_results`, `fetch_inline_chars`, `fetch_save_chars`, `jina_timeout`, `jina_retry_on_429`, `searxng_settings_path`, `searxng_source_dir` | search/fetch behaviour |
@@ -132,6 +133,22 @@ Environment variables (override the config file):
   `./memory/agent_tasks`).
 - `LANGBOT_VAULT_PASSWORD` — if set, the vault master key is wrapped with a
   password-derived key instead of being stored in recoverable form on disk.
+- `LANGBOT_LOG_FILE` — where log records are written (default `./memory/langbot.log`).
+- `LANGBOT_LOG_LEVEL` — log verbosity (default `WARNING`).
+- `LANGBOT_LOG_CONSOLE` — set to `1` to also stream log records to stderr.
+
+### Logs
+
+The terminal is reserved for the UI: diagnostics from the agent and its background
+threads (distillation warnings, tool-call repairs, routing guards) go to a rotating log
+file — `./memory/langbot.log` by default — instead of being printed between the REPL's
+panels and prompt. `/config` and `/health` show the active log file.
+
+```bash
+tail -f memory/langbot.log                 # watch diagnostics next to the REPL
+LANGBOT_LOG_LEVEL=DEBUG python langbot.py  # more detail (per-chunk graph tracing)
+LANGBOT_LOG_CONSOLE=1 python langbot.py    # mirror records to stderr as well
+```
 
 ## Usage
 
@@ -191,7 +208,8 @@ content whenever the server does not parse the tags:
 ```
 
 langbot detects both, converts them into real tool calls, and executes them, logging a
-warning each time (`tool_call_repair: model emitted N tool call(s) as text ...`). The
+warning to the log file each time (`tool_call_repair: model emitted N tool call(s) as
+text ...`). The
 repair only fires when the message has no native tool calls and the tool name is actually
 registered, so ordinary answers that merely discuss JSON are untouched. The same models
 wrap plain answers (`{"content": "...", "tool_calls": []}`) and the distiller's fact array
@@ -220,6 +238,7 @@ components/
   code_search.py        # find_in_files / read_many_files / glob_list
   tasks.py              # background task manager (start/list/status/output/kill)
   config.py             # optional config file (langbot.config.json) with default fallbacks
+  logging_setup.py      # routes log records to ./memory/langbot.log, off the REPL
   tool_call_repair.py   # recovers tool calls from models that emit them as text
   scratch.py            # shared on-disk scratchpad + read_scratch paging
   memory_store.py       # embeddings + Chroma collection (store/recall, write lock)
