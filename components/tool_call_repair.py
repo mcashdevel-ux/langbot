@@ -133,7 +133,30 @@ def _json_objects(text: str):
                         return
 
 
-def _normalize_call(entry, valid_names) -> "dict | None":
+def _rename_args(name: str, args: dict, aliases) -> dict:
+    """Map known wrong-but-obvious argument names onto the real parameters.
+
+    Weak models get parameter *names* wrong as readily as the call protocol
+    (``recall(memory_id=...)`` instead of ``recall(query=...)``), and an unknown
+    keyword fails the call outright. Only aliases the caller declares are
+    renamed, and never over an argument the model already got right.
+    """
+    table = (aliases or {}).get(name)
+    if not table:
+        return args
+    renamed = {}
+    for key, value in args.items():
+        target = table.get(key, key)
+        if target != key and target in args:
+            continue                       # the correct name is already present
+        renamed[target] = value
+    if renamed != args:
+        logger.debug("tool_call_repair: renamed %s args %s -> %s",
+                     name, sorted(args), sorted(renamed))
+    return renamed
+
+
+def _normalize_call(entry, valid_names, aliases=None) -> "dict | None":
     """Turn one textual call entry into a LangChain-shaped tool_call dict."""
     if not isinstance(entry, dict):
         return None
@@ -162,13 +185,13 @@ def _normalize_call(entry, valid_names) -> "dict | None":
         return None
     return {
         "name": name,
-        "args": raw_args,
+        "args": _rename_args(name, raw_args, aliases),
         "id": entry.get("id") or f"call_{uuid.uuid4().hex[:24]}",
         "type": "tool_call",
     }
 
 
-def _calls_from_object(obj, valid_names) -> "list[dict]":
+def _calls_from_object(obj, valid_names, aliases=None) -> "list[dict]":
     """Extract calls from one parsed object, or [] if it isn't a call payload."""
     raw = obj.get("tool_calls")
     if raw is None:
@@ -176,14 +199,14 @@ def _calls_from_object(obj, valid_names) -> "list[dict]":
     if isinstance(raw, dict):
         raw = [raw]
     if isinstance(raw, list):
-        calls = [c for c in (_normalize_call(e, valid_names) for e in raw) if c]
+        calls = [c for c in (_normalize_call(e, valid_names, aliases) for e in raw) if c]
         return calls
     # A bare {"name": ..., "args": {...}} object, with no wrapper.
-    single = _normalize_call(obj, valid_names)
+    single = _normalize_call(obj, valid_names, aliases)
     return [single] if single else []
 
 
-def parse_tool_calls(content: str, valid_names) -> "tuple[str, list[dict]]":
+def parse_tool_calls(content: str, valid_names, arg_aliases=None) -> "tuple[str, list[dict]]":
     """Extract tool calls embedded in ``content``.
 
     Returns ``(remaining_content, calls)``. ``calls`` is empty when nothing
@@ -201,14 +224,14 @@ def parse_tool_calls(content: str, valid_names) -> "tuple[str, list[dict]]":
     remaining_xml = content
     for match in _TOOL_CALL_TAG_RE.finditer(content):
         for _, _, obj in _json_objects(match.group(1)):
-            xml_calls.extend(_calls_from_object(obj, valid_names))
+            xml_calls.extend(_calls_from_object(obj, valid_names, arg_aliases))
         remaining_xml = remaining_xml.replace(match.group(0), " ")
     if xml_calls:
         return _clean_markup(remaining_xml), xml_calls
 
     text = _strip_fences(content)
     for start, end, obj in _json_objects(text):
-        calls = _calls_from_object(obj, valid_names)
+        calls = _calls_from_object(obj, valid_names, arg_aliases)
         if not calls:
             continue
         if "content" in obj and isinstance(obj["content"], str):
@@ -250,7 +273,7 @@ def unwrap_content(text) -> "str | None":
     return inner.strip()
 
 
-def repair_message(message, valid_names) -> bool:
+def repair_message(message, valid_names, arg_aliases=None) -> bool:
     """Rewrite ``message`` in place if its content hides tool calls or markup.
 
     Returns True when the message was changed. No-ops when it already has native
@@ -264,7 +287,7 @@ def repair_message(message, valid_names) -> bool:
     if not isinstance(content, str):
         return False
 
-    remaining, calls = parse_tool_calls(content, valid_names)
+    remaining, calls = parse_tool_calls(content, valid_names, arg_aliases)
     if calls:
         logger.warning(
             "tool_call_repair: model emitted %d tool call(s) as text instead of "

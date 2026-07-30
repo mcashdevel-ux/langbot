@@ -22,7 +22,13 @@ long-term memory (Chroma + sentence-transformers).
   `/health` shows its queue depth and dropped-job count.
 - **Long-term memory** — Chroma vector store (`agent_memory_chroma/`) with
   `remember` / `recall` tools plus automatic distillation, all behind
-  `components/memory_store.py`.
+  `components/memory_store.py`. Memory is only ever read when the model asks for it
+  (`recall`) or you do (`/knowledge`) — nothing is injected into every turn.
+  Retrieval is not a bare k-NN: hits below `memory.min_similarity` are dropped
+  instead of being passed off as facts, candidates are over-fetched and then
+  narrowed by MMR so `n` results are `n` *distinct* facts, a lexical leg finds the
+  paths / env-var names / ports / error codes that sentence embeddings miss, and
+  writes skip duplicates so one repeated fact cannot own every result slot.
 - **Context-cheap tool results** (`components/scratch.py`) — every tool that can return a
   large payload (page fetches, file reads, grep hits) saves the full result to an on-disk
   scratchpad and returns a short preview plus a `scratch:id`; `read_scratch` pages through
@@ -111,7 +117,8 @@ Precedence for a single setting: **environment variable > config file > default.
 | `llm` | `base_url`, `model`, `temperature`, `max_retries` | OpenAI-compatible endpoint |
 | `paths` | `checkpoint_db`, `chroma_dir`, `scratch_dir`, `tasks_dir`, `vault_dir`, `log_file` | keep inside `./memory/` per `MEMORY_POLICY.md` |
 | `logging` | `level`, `console`, `max_bytes`, `backup_count` | log destination and verbosity (see below) |
-| `memory` | `collection_name`, `embedding_model`, `embedding_device`, `worker_queue_size`, `worker_batch_size`, `worker_shutdown_timeout` | background distiller + vector store |
+| `memory` | `collection_name`, `embedding_model`, `embedding_device`, `worker_queue_size`, `worker_batch_size`, `worker_shutdown_timeout`, `max_facts_per_turn` | background distiller + vector store |
+| `memory` (search) | `min_similarity`, `recall_overfetch`, `mmr_lambda`, `dedup_similarity`, `dedup_token_overlap`, `lexical_search` | retrieval precision (see below) |
 | `tools` | `read_inline_chars`, `grep_inline_lines`, `manyfiles_inline_chars`, `scratch_save_chars`, `max_output_chars` | how much tool output goes inline vs. to scratch |
 | `web` | `search_snippet_chars`, `search_max_results`, `fetch_inline_chars`, `fetch_save_chars`, `jina_timeout`, `jina_retry_on_429`, `searxng_settings_path`, `searxng_source_dir` | search/fetch behaviour |
 | `routing` | `max_nudges_per_turn` | autonomy nudge budget per turn |
@@ -149,6 +156,26 @@ tail -f memory/langbot.log                 # watch diagnostics next to the REPL
 LANGBOT_LOG_LEVEL=DEBUG python langbot.py  # more detail (per-chunk graph tracing)
 LANGBOT_LOG_CONSOLE=1 python langbot.py    # mirror records to stderr as well
 ```
+
+### Memory search
+
+Long-term memory is read **on demand only** — when the model calls `recall`, or when you
+run `/knowledge <query>`. Nothing is injected into every turn, so an unrelated question
+never arrives carrying unrelated "facts".
+
+What a lookup does, and the knobs for each part:
+
+| Setting | Default | Effect |
+|---------|---------|--------|
+| `min_similarity` | `0.3` | cosine similarity a hit must reach to count as relevant; below it, `recall` answers "nothing above the relevance threshold" rather than returning the nearest rows regardless of distance |
+| `recall_overfetch` | `4` | candidates fetched per requested result, before dedup and MMR narrow them |
+| `mmr_lambda` | `0.7` | relevance-vs-diversity tradeoff when picking the final `n` (`1.0` = pure relevance) |
+| `lexical_search` | `true` | run a literal-token leg beside the dense one and fuse the two by reciprocal rank; this is what finds `~/code/myapp`, `OPENAI_API_KEY` or `port 8080`, which sentence embeddings rank poorly |
+| `dedup_similarity` | `0.95` | how close a new fact must be to an existing one to be treated as a duplicate and not stored again |
+| `dedup_token_overlap` | `0.6` | vocabulary overlap also required for that duplicate verdict; on top of it the two must name the same identifiers, so `port 8080` never absorbs `port 8081` |
+
+`/knowledge <query>` prints each hit's score, matched legs, source and timestamp — the
+view to use when tuning `min_similarity` for your own store.
 
 ## Usage
 

@@ -14,7 +14,9 @@ from components.tool_call_repair import (
     unwrap_content,
 )
 
-NAMES = {"glob_list", "remember", "execute_shell_command", "read_any_file"}
+NAMES = {"glob_list", "remember", "recall", "execute_shell_command", "read_any_file"}
+ALIASES = {"recall": {"q": "query", "text": "query", "limit": "n"},
+           "remember": {"text": "fact"}}
 
 
 class FakeAI:
@@ -23,6 +25,30 @@ class FakeAI:
     def __init__(self, content, tool_calls=None):
         self.content = content
         self.tool_calls = tool_calls or []
+
+
+class TestArgAliases:
+    """Models that get the protocol wrong also get parameter names wrong."""
+
+    def test_alias_is_renamed_to_the_real_parameter(self):
+        raw = '{"name": "recall", "args": {"q": "where is the repo", "limit": 5}}'
+        _, calls = parse_tool_calls(raw, NAMES, ALIASES)
+        assert calls[0]["args"] == {"query": "where is the repo", "n": 5}
+
+    def test_correct_name_wins_over_its_alias(self):
+        raw = '{"name": "recall", "args": {"query": "real", "text": "stray"}}'
+        _, calls = parse_tool_calls(raw, NAMES, ALIASES)
+        assert calls[0]["args"] == {"query": "real"}
+
+    def test_unknown_tools_and_args_are_left_alone(self):
+        raw = '{"name": "glob_list", "args": {"text": "*.py"}}'
+        _, calls = parse_tool_calls(raw, NAMES, ALIASES)
+        assert calls[0]["args"] == {"text": "*.py"}
+
+    def test_no_alias_table_is_a_no_op(self):
+        raw = '{"name": "recall", "args": {"q": "where is the repo"}}'
+        _, calls = parse_tool_calls(raw, NAMES)
+        assert calls[0]["args"] == {"q": "where is the repo"}
 
 
 class TestParse:

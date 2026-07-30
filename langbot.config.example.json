@@ -30,7 +30,14 @@
     "embedding_device": "cpu",
     "worker_queue_size": 50,
     "worker_batch_size": 5,
-    "worker_shutdown_timeout": 10.0
+    "worker_shutdown_timeout": 10.0,
+    "max_facts_per_turn": 5,
+    "min_similarity": 0.3,
+    "recall_overfetch": 4,
+    "mmr_lambda": 0.7,
+    "dedup_similarity": 0.95,
+    "dedup_token_overlap": 0.6,
+    "lexical_search": true
   },
 
   "tools": {
