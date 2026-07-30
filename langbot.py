@@ -17,6 +17,13 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Send every component's log records to ./memory/langbot.log before anything can
+# emit one: unconfigured logging prints to stderr, i.e. into the middle of the
+# REPL's panels and prompt (see components/logging_setup.py).
+from components.logging_setup import log_path as _log_path, setup as _setup_logging
+
+_setup_logging()
+
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -29,7 +36,8 @@ try:
 except ModuleNotFoundError:
     from langgraph.checkpoint.memory import MemorySaver
     SQLITE_AVAILABLE = False
-    print("Warning: langgraph-checkpoint-sqlite not installed – conversation history will not persist.")
+    logger.warning("langgraph-checkpoint-sqlite not installed - conversation history "
+                   "will not persist")
 
 from components.web_tools import search_web as _search_web, fetch_url as _fetch_url
 from components.scratch import read_scratch as _read_scratch
@@ -448,7 +456,9 @@ def _stream_turn(app, config, user_input: str) -> None:
     instead of rendered. At DEBUG level every chunk's (node, message types) is
     logged so a duplicate can be traced back to its source — a second ``agent``
     invocation with no ``tools``/``nudge`` message in between points at the
-    graph, whereas two AI messages in one update points at the LLM server.
+    graph, whereas two AI messages in one update points at the LLM server. The
+    drop itself is logged at DEBUG because routing.route_agent already warns
+    about it; this guard only catches what slips past that one.
     """
     spinner = ui.GradientSpinner("Thinking...")
     spinner.start()
@@ -475,7 +485,7 @@ def _stream_turn(app, config, user_input: str) -> None:
                         and not (getattr(msg, "tool_calls", None) or [])
                     )
                     if is_final_answer and answered:
-                        logger.warning(
+                        logger.debug(
                             "dropping a duplicate final answer for this turn (preview: %r)",
                             str(msg.content)[:120],
                         )
@@ -540,6 +550,7 @@ def _handle_slash(text: str, config: dict) -> bool:
                              f"fetch {_web_tools.FETCH_INLINE_CHARS}")
         ui.kv("memory worker", f"queue {_memory_worker_mod.MAX_QUEUE_SIZE}, "
                                f"batch {_memory_worker_mod.MAX_BATCH}")
+        ui.kv("log file", str(_log_path() or "(stderr)"))
         return False
     if cmd == "info":
         ui.kv("model", LLM_MODEL)
@@ -557,6 +568,7 @@ def _handle_slash(text: str, config: dict) -> bool:
         ui.kv("memory jobs dropped", str(_memory_worker.dropped_count()))
         ui.kv("vault creds", str(len(_VAULT_ENV_LOADED)))
         ui.kv("bg tasks", str(len(_tasks.manager.list())))
+        ui.kv("log file", str(_log_path() or "(stderr)"))
         return False
     if cmd == "ls":
         ui.info(_glob_list(os.path.join(arg or ".", "*")))
@@ -635,6 +647,9 @@ def main() -> None:
     ui.warning("This agent has UNRESTRICTED shell, file, and web access.")
     if _VAULT_ENV_LOADED:
         ui.info(f"Vault: loaded {len(_VAULT_ENV_LOADED)} credential(s) into the environment.")
+    if not SQLITE_AVAILABLE:
+        ui.warning("langgraph-checkpoint-sqlite is not installed — conversation history "
+                   "will not persist.")
     ui.startup_tip(LLM_MODEL)
     session_id = f"session_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
     config = {"configurable": {"thread_id": session_id}}
