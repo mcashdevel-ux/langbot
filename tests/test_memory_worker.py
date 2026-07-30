@@ -106,6 +106,20 @@ class TestProcessing:
         w.enqueue(_job())
         assert _wait_until(lambda: store.facts == ["fenced fact"])
 
+    def test_envelope_wrapped_array_is_parsed(self, worker_factory):
+        """Models that wrap answers in {"content": ...} wrap the fact array too."""
+        store = _Store()
+        raw = '{"content": "[\\"wrapped fact\\"]", "tool_calls": []}'
+        w = worker_factory(llm=_StubLLM(raw=raw), store_fn=store)
+        w.enqueue(_job())
+        assert _wait_until(lambda: store.facts == ["wrapped fact"])
+
+    def test_object_with_a_fact_list_is_parsed(self, worker_factory):
+        store = _Store()
+        w = worker_factory(llm=_StubLLM(raw='{"facts": ["object fact"]}'), store_fn=store)
+        w.enqueue(_job())
+        assert _wait_until(lambda: store.facts == ["object fact"])
+
     def test_store_failure_does_not_kill_the_thread(self, worker_factory):
         calls = {"n": 0}
 
