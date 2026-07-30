@@ -7,12 +7,7 @@ The motivating case is a local Qwen LoRA that answered every prompt with
 import pytest
 
 from components import tool_call_repair
-from components.tool_call_repair import (
-    parse_tool_calls,
-    repair_message,
-    unwrap_content,
-    unwrap_payload,
-)
+from components.tool_call_repair import parse_tool_calls, repair_message, unwrap_content
 
 NAMES = {"glob_list", "remember", "execute_shell_command", "read_any_file"}
 
@@ -176,7 +171,6 @@ class TestUnwrapContent:
     ])
     def test_left_alone(self, text):
         assert unwrap_content(text) is None
-        assert unwrap_payload(text) == text
 
     def test_repair_message_unwraps_a_call_less_envelope(self):
         msg = FakeAI('{"content": "I have recalled the greeting.", "tool_calls": []}')

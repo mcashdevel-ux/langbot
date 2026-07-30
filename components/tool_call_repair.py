@@ -205,17 +205,6 @@ def unwrap_content(text) -> "str | None":
     return inner.strip()
 
 
-def unwrap_payload(text: str) -> str:
-    """``unwrap_content`` with a passthrough default, for non-message text.
-
-    Used where the model's raw output is parsed by something other than the
-    graph (e.g. the distiller's JSON fact array arriving wrapped in a chat
-    envelope).
-    """
-    inner = unwrap_content(text)
-    return inner if inner is not None else text
-
-
 def repair_message(message, valid_names) -> bool:
     """Rewrite ``message`` in place if its content hides tool calls.
 
