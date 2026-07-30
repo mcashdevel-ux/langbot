@@ -30,6 +30,9 @@ MAX_QUEUE_SIZE = config.get("memory.worker_queue_size", 50)
 # per job; only the store is batched.
 MAX_BATCH = config.get("memory.worker_batch_size", 5)
 SHUTDOWN_TIMEOUT = config.get("memory.worker_shutdown_timeout", 10.0)
+# Cap per turn: a model that returns twenty "facts" is padding, and padding is
+# what buries the real ones in every later search.
+MAX_FACTS_PER_TURN = config.get("memory.max_facts_per_turn", 5)
 
 
 @dataclass
@@ -51,6 +54,13 @@ Useful facts include:
 - Confirmed facts from tool output (e.g., "project located at ~/code/myapp")
 - Decisions or conclusions that are supported by evidence
 - Context helpful for future interactions
+
+Every fact must be worth retrieving months from now, and must be readable on its own:
+- Name the subject. "the langbot repo lives at ~/ai/repos/langbot", never "it lives there".
+- Include the specifics that make it findable: paths, hostnames, ports, versions, commands.
+- NEVER store conversational noise: greetings, thanks, small talk, the fact that the user
+  asked something, what you did this turn, or anything true only right now.
+- Prefer fewer, denser facts; at most {MAX_FACTS_PER_TURN}. An empty list is a good answer.
 
 User request: {job.user_text}
 Tool results this turn:
@@ -225,6 +235,10 @@ class MemoryWorker:
     def _distill(self, job: DistillJob) -> "list[str]":
         raw = self._llm.invoke(_distillation_prompt(job)).content
         facts = parse_facts(raw)
+        if facts is not None and len(facts) > MAX_FACTS_PER_TURN:
+            logger.debug("memory_worker: keeping %d of %d distilled fact(s)",
+                         MAX_FACTS_PER_TURN, len(facts))
+            facts = facts[:MAX_FACTS_PER_TURN]
         if facts is None:
             # Log the output itself: the shape a given model emits is the only
             # way to tell a prompt/template problem from a parser gap.

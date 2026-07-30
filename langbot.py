@@ -47,7 +47,7 @@ from components.config import CONFIG_ENV_VAR, CONFIG_FILENAME, config as app_con
 from components.memory_store import (
     count as _memory_count,
     get_embeddings as _load_embeddings,
-    recall_memories as _recall_memories,
+    search_memories as _search_memories,
     store_memory as _store_memory,
 )
 from components.memory_worker import DistillJob, MemoryWorker
@@ -125,21 +125,47 @@ _memory_worker = MemoryWorker(llm=llm)
 # ------------------------------------------------------------------------------
 @tool
 def remember(fact: str) -> str:
-    """Manually store a fact in long-term memory."""
+    """Store one durable fact in long-term memory.
+
+    Args:
+        fact: a self-contained statement worth knowing in future sessions
+            (e.g. "the langbot repo lives at ~/ai/repos/langbot"). Greetings,
+            small talk, and anything true only of this turn do not belong here.
+
+    Facts that duplicate something already stored are not stored twice.
+    """
     try:
+        before = _memory_count()
         mem_id = _store_memory(fact)
-        return f"Memory stored (id {mem_id}): {fact[:200]}..."
+        stored = "Memory stored" if _memory_count() > before else "Already remembered"
+        return f"{stored} (id {mem_id}): {truncate(fact, 200)}"
     except Exception as e:
         return f"Failed to store memory: {e}"
 
 @tool
 def recall(query: str, n: int = 3) -> str:
-    """Search long-term memory for similar facts."""
+    """Search long-term memory for facts relevant to a query.
+
+    Call this before answering anything that depends on what you already know about
+    the user or this machine: preferences, project and file locations, credentials'
+    names, past decisions, earlier findings.
+
+    Args:
+        query: what to look for, in words (e.g. "where does the langbot repo live").
+        n: how many facts to return at most (default 3).
+
+    Only facts above a relevance threshold are returned, each with a similarity
+    score; an empty result means memory holds nothing relevant, not that the search
+    failed. Use `remember` to store a new fact.
+    """
     try:
-        memories = _recall_memories(query, n)
+        memories = _search_memories(query, n)
         if not memories:
-            return "No relevant memories found."
-        return "Relevant memories:\n" + "\n".join(f"- {m}" for m in memories)
+            return ("No memory is relevant to that query "
+                    "(nothing above the relevance threshold).")
+        return "Relevant memories:\n" + "\n".join(
+            f"- {m.text}  [relevance {m.score:.2f}]" for m in memories
+        )
     except Exception as e:
         return f"Failed to recall memories: {e}"
 
@@ -296,6 +322,15 @@ tools = [
 llm_with_tools = llm.bind_tools(tools)
 _TOOL_NAMES = {t.name for t in tools}
 
+# Argument names weak models reach for instead of the real ones. Renaming them is
+# strictly better than letting the call fail on an unexpected keyword; only
+# unambiguous synonyms belong here (nothing that could change what a call means).
+_ARG_ALIASES = {
+    "recall": {"q": "query", "text": "query", "search": "query", "question": "query",
+               "limit": "n", "top_k": "n", "k": "n"},
+    "remember": {"text": "fact", "memory": "fact", "content": "fact", "facts": "fact"},
+}
+
 # ------------------------------------------------------------------------------
 # 4. System Prompt (autonomy + memory)
 # ------------------------------------------------------------------------------
@@ -307,7 +342,8 @@ system_prompt = SystemMessage(content=(
     "2. NEVER ASK FOR PERMISSION: Do NOT output phrases like 'Would you like me to proceed?', 'Should I fetch...', or 'Shall I run...'. If the user asks for a task (e.g. 'validate all secrets'), DO NOT describe how you would do it in text — ACTUALLY INVOKE THE TOOLS to execute it right now.\n"
     "3. USE NATIVE TOOL CALLING ONLY: You have native tools available (e.g., `search_web`, `fetch_url`, `execute_shell_command`). DO NOT write python scripts to import these tools. DO NOT write dummy `curl` commands in text blocks. You must invoke the provided tools directly via your function calling interface.\n"
     "4. AUTOMATIC MULTI-STEP RETRY: If a tool call fails or returns empty/partial results, try alternative parameters, tools, or shell commands immediately in the same turn. Do not stop and hand control back to the user until the full objective is achieved.\n\n"
-    "For editing files, prefer 'patch_file' over rewriting whole files. For background tasks, use 'task_start'. Use 'recall' to check long-term memory when relevant."
+    "For editing files, prefer 'patch_file' over rewriting whole files. For background tasks, use 'task_start'.\n"
+    "MEMORY: call 'recall' with a plain-language query BEFORE answering anything that depends on what you already know about the user or this machine — their preferences, where projects and files live, which credentials exist, decisions taken earlier. An empty result means nothing relevant is stored, so just proceed. Call 'remember' only for durable facts (not greetings or small talk)."
 ))
 
 # ------------------------------------------------------------------------------
@@ -318,12 +354,15 @@ def agent(state: MessagesState):
     response = llm_with_tools.invoke(messages)
     # Small local models often print the call they meant to make instead of
     # using the tool-calling channel; recover those so they actually execute.
-    repair_message(response, _TOOL_NAMES)
+    repair_message(response, _TOOL_NAMES, _ARG_ALIASES)
     return {"messages": [response]}
 
 # ------------------------------------------------------------------------------
 # 6. Automatic Knowledge Distillation Node
 # ------------------------------------------------------------------------------
+_MEMORY_TOOL_NAMES = {"remember", "recall"}
+
+
 def distill_knowledge(state: MessagesState) -> MessagesState:
     """
     Hand the turn's user request, tool results, and answer to the background
@@ -334,7 +373,9 @@ def distill_knowledge(state: MessagesState) -> MessagesState:
     that returned a result. If the model only *described* what it would do (no
     tool messages in this turn), there is nothing factual to extract — storing
     the assistant's intentions as facts would poison the memory with
-    hallucinations.
+    hallucinations. The memory tools themselves don't count as evidence: a turn
+    whose only tool call was ``remember``/``recall`` has no new grounding, and
+    treating it as such is how greetings ended up in long-term memory.
     """
     user_msgs = [m for m in state["messages"] if isinstance(m, HumanMessage)]
     ai_msgs = [m for m in state["messages"] if m.type == "ai" and m.content]
@@ -347,7 +388,11 @@ def distill_knowledge(state: MessagesState) -> MessagesState:
         i for i, m in enumerate(state["messages"]) if isinstance(m, HumanMessage)
     )
     turn_msgs = state["messages"][last_human_idx:]
-    tool_results = [m for m in turn_msgs if getattr(m, "type", None) == "tool"]
+    tool_results = [
+        m for m in turn_msgs
+        if getattr(m, "type", None) == "tool"
+        and getattr(m, "name", None) not in _MEMORY_TOOL_NAMES
+    ]
     if not tool_results:
         logger.debug("Knowledge distillation skipped: no tool results in this turn.")
         return state
@@ -543,6 +588,10 @@ def _handle_slash(text: str, config: dict) -> bool:
         ui.kv("llm", f"{LLM_MODEL} @ {BASE_URL} (temp {LLM_TEMPERATURE})")
         ui.kv("checkpoint db", SQLITE_DB_PATH)
         ui.kv("memory store", _memory_store.CHROMA_PERSIST_DIR)
+        ui.kv("memory search", f"min similarity {_memory_store.MIN_SIMILARITY}, "
+                               f"overfetch x{_memory_store.RECALL_OVERFETCH}, "
+                               f"mmr lambda {_memory_store.MMR_LAMBDA}, "
+                               f"lexical {'on' if _memory_store.LEXICAL_SEARCH else 'off'}")
         ui.kv("scratch dir", _scratch.SCRATCH_DIR)
         ui.kv("tasks dir", _tasks.TASKS_DIR)
         ui.kv("inline caps", f"file {_file_ops.READ_INLINE_CHARS}, "
@@ -577,15 +626,30 @@ def _handle_slash(text: str, config: dict) -> bool:
         if not arg:
             ui.warning("Usage: /knowledge <query>")
             return False
-        mems = _recall_memories(arg, n=5)
-        ui.info("\n".join(f"- {m}" for m in mems) if mems else "No relevant memories.")
+        # Scores and provenance are shown here because this view is how you tune
+        # memory.min_similarity: a query whose good hits sit below the floor (or
+        # whose junk hits sit above it) tells you which way to move it.
+        mems = _search_memories(arg, n=5)
+        if not mems:
+            ui.info("No memory above the relevance threshold "
+                    f"({_memory_store.MIN_SIMILARITY}).")
+            return False
+        ui.info("\n".join(
+            f"- [{m.score:.2f} {'+'.join(m.matched) or 'dense'}] {m.text}"
+            f"  ({m.source or 'unknown'}, {m.timestamp or 'no timestamp'})"
+            for m in mems
+        ))
         return False
     if cmd == "save":
         if not arg:
             ui.warning("Usage: /save <fact to remember>")
             return False
+        before = _memory_count()
         _store_memory(arg)
-        ui.success("Saved to long-term memory.")
+        if _memory_count() == before:
+            ui.info("Already in long-term memory (duplicate).")
+        else:
+            ui.success("Saved to long-term memory.")
         return False
 
     ui.warning(f"Unknown command: /{cmd}  (try /help)")

@@ -11,6 +11,7 @@ import time
 
 import pytest
 
+from components import memory_worker
 from components.memory_worker import DistillJob, MemoryWorker, parse_facts
 
 
@@ -123,6 +124,14 @@ class TestProcessing:
         assert _wait_until(lambda: store.facts)
         assert store.facts == ["langbot lives in ~/repos/langbot"]
         assert "30 matches" in llm.prompts[0]
+
+    def test_facts_are_capped_per_turn(self, worker_factory, monkeypatch):
+        monkeypatch.setattr(memory_worker, "MAX_FACTS_PER_TURN", 2)
+        store = _Store()
+        w = worker_factory(llm=_StubLLM(facts=["one", "two", "three", "four"]),
+                           store_fn=store)
+        w.enqueue(_job())
+        assert _wait_until(lambda: store.facts == ["one", "two"])
 
     def test_no_store_call_when_no_facts(self, worker_factory):
         store = _Store()
