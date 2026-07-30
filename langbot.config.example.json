@@ -13,7 +13,15 @@
     "chroma_dir": "./memory/agent_memory_chroma",
     "scratch_dir": "./memory/agent_scratch",
     "tasks_dir": "./memory/agent_tasks",
-    "vault_dir": "memory/vault"
+    "vault_dir": "memory/vault",
+    "log_file": "./memory/langbot.log"
+  },
+
+  "logging": {
+    "level": "WARNING",
+    "console": false,
+    "max_bytes": 1000000,
+    "backup_count": 3
   },
 
   "memory": {

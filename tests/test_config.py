@@ -168,6 +168,7 @@ class TestExampleFile:
         """The example file documents defaults, so it must not change behaviour."""
         import components.code_search as code_search
         import components.file_ops as file_ops
+        import components.logging_setup as logging_setup
         import components.memory_worker as memory_worker
         import components.tool_call_repair as tool_call_repair
         import components.web_tools as web_tools
@@ -182,3 +183,8 @@ class TestExampleFile:
         assert example["memory"]["worker_batch_size"] == memory_worker.MAX_BATCH
         assert example["compat"]["repair_json_tool_calls"] == tool_call_repair.REPAIR_ENABLED
         assert example["compat"]["repair_max_candidates"] == tool_call_repair.MAX_CANDIDATES
+        assert example["paths"]["log_file"] == logging_setup.LOG_FILE
+        assert example["logging"]["level"] == logging_setup.LOG_LEVEL
+        assert example["logging"]["console"] == logging_setup.LOG_TO_CONSOLE
+        assert example["logging"]["max_bytes"] == logging_setup.LOG_MAX_BYTES
+        assert example["logging"]["backup_count"] == logging_setup.LOG_BACKUP_COUNT
