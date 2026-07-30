@@ -169,6 +169,7 @@ class TestExampleFile:
         import components.code_search as code_search
         import components.file_ops as file_ops
         import components.memory_worker as memory_worker
+        import components.tool_call_repair as tool_call_repair
         import components.web_tools as web_tools
 
         example_path = REPO_ROOT / "langbot.config.example.json"
@@ -179,3 +180,5 @@ class TestExampleFile:
         assert example["web"]["fetch_save_chars"] == web_tools.FETCH_SAVE_CHARS
         assert example["memory"]["worker_queue_size"] == memory_worker.MAX_QUEUE_SIZE
         assert example["memory"]["worker_batch_size"] == memory_worker.MAX_BATCH
+        assert example["compat"]["repair_json_tool_calls"] == tool_call_repair.REPAIR_ENABLED
+        assert example["compat"]["repair_max_candidates"] == tool_call_repair.MAX_CANDIDATES
