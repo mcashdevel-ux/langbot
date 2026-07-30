@@ -184,7 +184,10 @@ call into the answer instead:
 langbot detects that, converts it into real tool calls, and executes them, logging a
 warning each time (`tool_call_repair: model emitted N tool call(s) as text ...`). The
 repair only fires when the message has no native tool calls and the tool name is actually
-registered, so ordinary answers that merely discuss JSON are untouched. Set
+registered, so ordinary answers that merely discuss JSON are untouched. The same models
+wrap plain answers (`{"content": "...", "tool_calls": []}`) and the distiller's fact array
+in that envelope; both are unwrapped as well, so the user sees prose rather than JSON and
+knowledge distillation still works. Set
 `compat.repair_json_tool_calls` to `false` to see the raw output instead — a stream of
 those warnings is a good signal to fix the model's chat template or prompt format.
 
