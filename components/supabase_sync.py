@@ -135,8 +135,13 @@ class SupabaseSync:
 
     def _local_facts(self) -> list[str]:
         """Return active fact strings from the local ChromaDB memory store (and knowledge.md if present)."""
-        facts = []
-        
+        return [fact for fact, _ in self._local_fact_entries()]
+
+    def _local_fact_entries(self) -> "list[tuple[str, list[str]]]":
+        """Like ``_local_facts`` but each fact carries its stored tags."""
+        facts: "list[tuple[str, list[str]]]" = []
+        seen: "set[str]" = set()
+
         # 1. Try reading from ChromaDB (primary source)
         try:
             collection = _get_memory_collection()
@@ -160,7 +165,9 @@ class SupabaseSync:
                             fact_text = meta["text"].strip()
                             # Exclude secrets and duplicates
                             if fact_text and not fact_text.startswith(VAULT_SECRET_MARKER):
-                                facts.append(fact_text)
+                                tags = [t for t in (meta.get("tags") or "").split(",") if t]
+                                facts.append((fact_text, tags))
+                                seen.add(fact_text)
         except Exception as e:
             logger.warning("supabase_sync: error reading local ChromaDB facts: %s", e)
 
@@ -174,14 +181,20 @@ class SupabaseSync:
                         continue
                     if "]: " in stripped:
                         content = stripped.split("]: ", 1)[1].strip()
-                        if content and content not in facts and not content.startswith(VAULT_SECRET_MARKER):
-                            facts.append(content)
+                        if content and content not in seen and not content.startswith(VAULT_SECRET_MARKER):
+                            facts.append((content, []))
+                            seen.add(content)
             except Exception as e:
                 logger.warning("supabase_sync: error reading legacy knowledge file: %s", e)
                 
         return facts
 
-    def _store_facts_locally_batch(self, facts: list[str], timestamps: list[str]) -> bool:
+    def _store_facts_locally_batch(
+        self,
+        facts: list[str],
+        timestamps: list[str],
+        tags_list: "list[list[str]] | None" = None,
+    ) -> bool:
         """Store multiple facts in the local ChromaDB memory store in batch."""
         if not facts:
             return True
@@ -194,7 +207,8 @@ class SupabaseSync:
             try:
                 from . import memory_store as _ms
 
-                _ms.store_memories_batch(facts, timestamps, source="supabase")
+                _ms.store_memories_batch(facts, timestamps, source="supabase",
+                                         tags_list=tags_list)
                 return True
             except Exception as e:
                 logger.warning("supabase_sync: memory_store batch store failed: %s", e)
@@ -271,7 +285,7 @@ class SupabaseSync:
         if not self.enabled:
             return "Supabase not configured (set SUPABASE_URL + SUPABASE_SERVICE_KEY in vault or env)."
 
-        entries = self._local_facts()
+        entries = self._local_fact_entries()
         if not entries:
             return "No local knowledge entries to push."
 
@@ -292,10 +306,10 @@ class SupabaseSync:
             existing = set()
 
         pushed = errors = 0
-        for fact in entries:
+        for fact, tags in entries:
             if fact in existing:
                 continue
-            payload = {"fact": fact, "tags": [], "access_count": 0, "stale": False}
+            payload = {"fact": fact, "tags": tags, "access_count": 0, "stale": False}
             try:
                 r = requests.post(
                     f"{self.url}/rest/v1/knowledge",
@@ -324,7 +338,7 @@ class SupabaseSync:
                 f"{self.url}/rest/v1/knowledge",
                 headers=self._headers(),
                 params={
-                    "select": "fact,created_at",
+                    "select": "fact,created_at,tags",
                     "stale": "eq.false",
                     "order": "created_at.desc",
                 },
@@ -342,6 +356,7 @@ class SupabaseSync:
             new_lines: list[str] = []
             facts_to_store = []
             timestamps_to_store = []
+            tags_to_store = []
 
             for entry in remote_facts:
                 fact = entry.get("fact", "").strip()
@@ -351,6 +366,9 @@ class SupabaseSync:
                 
                 facts_to_store.append(fact)
                 timestamps_to_store.append(entry.get("created_at"))
+                raw_tags = entry.get("tags")
+                tags_to_store.append([t for t in raw_tags if isinstance(t, str)]
+                                     if isinstance(raw_tags, list) else [])
                 
                 ts = entry.get("created_at", "")
                 try:
@@ -362,7 +380,8 @@ class SupabaseSync:
                 pulled += 1
 
             if facts_to_store:
-                self._store_facts_locally_batch(facts_to_store, timestamps_to_store)
+                self._store_facts_locally_batch(facts_to_store, timestamps_to_store,
+                                                tags_to_store)
 
             if new_lines:
                 self._append_facts(new_lines)
