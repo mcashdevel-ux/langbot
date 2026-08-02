@@ -124,19 +124,21 @@ _memory_worker = MemoryWorker(llm=llm)
 # 3. Tools (original + memory)
 # ------------------------------------------------------------------------------
 @tool
-def remember(fact: str) -> str:
+def remember(fact: str, tags: "list[str] | None" = None) -> str:
     """Store one durable fact in long-term memory.
 
     Args:
         fact: a self-contained statement worth knowing in future sessions
             (e.g. "the langbot repo lives at ~/ai/repos/langbot"). Greetings,
             small talk, and anything true only of this turn do not belong here.
+        tags: optional short category words for the fact (e.g. ["preference"],
+            ["filesystem", "project"]); searchable later via `recall("#tag")`.
 
     Facts that duplicate something already stored are not stored twice.
     """
     try:
         before = _memory_count()
-        mem_id = _store_memory(fact)
+        mem_id = _store_memory(fact, tags=tags)
         stored = "Memory stored" if _memory_count() > before else "Already remembered"
         return f"{stored} (id {mem_id}): {truncate(fact, 200)}"
     except Exception as e:
@@ -152,6 +154,7 @@ def recall(query: str, n: int = 3) -> str:
 
     Args:
         query: what to look for, in words (e.g. "where does the langbot repo live").
+            A "#tag" token (e.g. "#preference") matches facts carrying that tag.
         n: how many facts to return at most (default 3).
 
     Only facts above a relevance threshold are returned, each with a similarity
@@ -164,7 +167,10 @@ def recall(query: str, n: int = 3) -> str:
             return ("No memory is relevant to that query "
                     "(nothing above the relevance threshold).")
         return "Relevant memories:\n" + "\n".join(
-            f"- {m.text}  [relevance {m.score:.2f}]" for m in memories
+            f"- {m.text}  [relevance {m.score:.2f}"
+            + (" " + " ".join(f"#{t}" for t in m.tags) if m.tags else "")
+            + "]"
+            for m in memories
         )
     except Exception as e:
         return f"Failed to recall memories: {e}"
@@ -328,7 +334,8 @@ _TOOL_NAMES = {t.name for t in tools}
 _ARG_ALIASES = {
     "recall": {"q": "query", "text": "query", "search": "query", "question": "query",
                "limit": "n", "top_k": "n", "k": "n"},
-    "remember": {"text": "fact", "memory": "fact", "content": "fact", "facts": "fact"},
+    "remember": {"text": "fact", "memory": "fact", "content": "fact", "facts": "fact",
+                 "tag": "tags", "labels": "tags", "categories": "tags"},
 }
 
 # ------------------------------------------------------------------------------
@@ -545,6 +552,15 @@ def _stream_turn(app, config, user_input: str) -> None:
             spinner.stop()
 
 
+def _split_trailing_tags(text: str) -> "tuple[str, list[str]]":
+    """Split trailing ``#tag`` tokens off a /save argument."""
+    words = text.split()
+    tags: "list[str]" = []
+    while words and words[-1].startswith("#") and len(words[-1]) > 1:
+        tags.insert(0, words.pop()[1:])
+    return " ".join(words), tags
+
+
 _SLASH_HELP = [
     ("/help", "Show this help"),
     ("/quit, /exit", "End the session"),
@@ -553,8 +569,8 @@ _SLASH_HELP = [
     ("/health", "Show checkpointer, memory, vault, and task status"),
     ("/config", "Show the active config file (or that defaults are in use)"),
     ("/ls [dir]", "List files in a directory"),
-    ("/knowledge <q>", "Search long-term memory"),
-    ("/save <fact>", "Store a fact in long-term memory"),
+    ("/knowledge <q>", "Search long-term memory (a '#tag' query filters by tag)"),
+    ("/save <fact> [#tag ...]", "Store a fact in long-term memory, optionally tagged"),
 ]
 
 
@@ -636,20 +652,26 @@ def _handle_slash(text: str, config: dict) -> bool:
             return False
         ui.info("\n".join(
             f"- [{m.score:.2f} {'+'.join(m.matched) or 'dense'}] {m.text}"
-            f"  ({m.source or 'unknown'}, {m.timestamp or 'no timestamp'})"
+            + ("  " + " ".join(f"#{t}" for t in m.tags) if m.tags else "")
+            + f"  ({m.source or 'unknown'}, {m.timestamp or 'no timestamp'})"
             for m in mems
         ))
         return False
     if cmd == "save":
         if not arg:
-            ui.warning("Usage: /save <fact to remember>")
+            ui.warning("Usage: /save <fact to remember> [#tag ...]")
+            return False
+        fact, tags = _split_trailing_tags(arg)
+        if not fact:
+            ui.warning("A fact cannot be only tags.")
             return False
         before = _memory_count()
-        _store_memory(arg)
+        _store_memory(fact, tags=tags)
         if _memory_count() == before:
             ui.info("Already in long-term memory (duplicate).")
         else:
-            ui.success("Saved to long-term memory.")
+            ui.success("Saved to long-term memory"
+                       + (" " + " ".join(f"#{t}" for t in tags) if tags else "") + ".")
         return False
 
     ui.warning(f"Unknown command: /{cmd}  (try /help)")

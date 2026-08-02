@@ -12,7 +12,12 @@ import time
 import pytest
 
 from components import memory_worker
-from components.memory_worker import DistillJob, MemoryWorker, parse_facts
+from components.memory_worker import (
+    DistillJob,
+    MemoryWorker,
+    parse_fact_entries,
+    parse_facts,
+)
 
 
 class TestParseFacts:
@@ -55,6 +60,26 @@ class TestParseFacts:
         assert parse_facts(raw) is None
 
 
+class TestParseFactEntries:
+    """Tags ride along with facts when the model supplies them, and default to
+    an empty list for every other accepted shape."""
+
+    @pytest.mark.parametrize("raw, expected", [
+        ('[{"fact": "tagged", "tags": ["preference", "ui"]}]',
+         [("tagged", ["preference", "ui"])]),
+        ('[{"fact": "one tag string", "tags": "web"}]', [("one tag string", ["web"])]),
+        ('[{"fact": "junk tags", "tags": [1, "kept", null]}]', [("junk tags", ["kept"])]),
+        ('["bare string"]', [("bare string", [])]),
+        ('{"facts": [{"fact": "keyed", "tags": ["a"]}]}', [("keyed", ["a"])]),
+        ("- bullet", [("bullet", [])]),
+    ])
+    def test_tags_are_carried(self, raw, expected):
+        assert parse_fact_entries(raw) == expected
+
+    def test_unreadable_returns_none(self):
+        assert parse_fact_entries("nope, nothing here") is None
+
+
 class _StubLLM:
     """Returns a fixed JSON array; optionally sleeps to simulate a slow call."""
 
@@ -81,9 +106,10 @@ class _Store:
         self.batches = []
         self._lock = threading.Lock()
 
-    def __call__(self, facts):
+    def __call__(self, facts, tags_list=None):
         with self._lock:
             self.batches.append(list(facts))
+            self.tags_batches = getattr(self, "tags_batches", []) + [list(tags_list or [])]
         return [str(i) for i in range(len(facts))]
 
     @property
@@ -124,6 +150,14 @@ class TestProcessing:
         assert _wait_until(lambda: store.facts)
         assert store.facts == ["langbot lives in ~/repos/langbot"]
         assert "30 matches" in llm.prompts[0]
+
+    def test_tags_reach_the_store(self, worker_factory):
+        store = _Store()
+        raw = '[{"fact": "prefers ddg", "tags": ["preference"]}]'
+        w = worker_factory(llm=_StubLLM(raw=raw), store_fn=store)
+        w.enqueue(_job())
+        assert _wait_until(lambda: store.facts == ["prefers ddg"])
+        assert store.tags_batches == [[["preference"]]]
 
     def test_facts_are_capped_per_turn(self, worker_factory, monkeypatch):
         monkeypatch.setattr(memory_worker, "MAX_FACTS_PER_TURN", 2)
@@ -172,7 +206,7 @@ class TestProcessing:
     def test_store_failure_does_not_kill_the_thread(self, worker_factory):
         calls = {"n": 0}
 
-        def flaky(facts):
+        def flaky(facts, tags_list=None):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise RuntimeError("chroma down")

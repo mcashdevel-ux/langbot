@@ -238,6 +238,68 @@ class TestLexicalLeg:
         assert "openai_api_key" in tokens and "8080" in tokens
 
 
+class TestTags:
+    def test_clean_tags_normalizes_and_caps(self):
+        assert memory_store.clean_tags(["  Preference ", "UI/UX", "ui-ux", 3, ""]) == [
+            "preference", "ui-ux",
+        ]
+        many = [f"t{i}" for i in range(10)]
+        assert len(memory_store.clean_tags(many)) == memory_store.MAX_TAGS
+
+    @pytest.mark.parametrize("text,tag", [
+        ("the user prefers DuckDuckGo", "preference"),
+        ("OPENAI_API_KEY is set in the environment", "credentials"),
+        ("docs live at https://docs.example.com", "web"),
+        ("the project lives at ~/code/myapp", "filesystem"),
+    ])
+    def test_auto_tags(self, text, tag):
+        assert tag in memory_store.auto_tags(text)
+
+    def test_auto_tags_stay_out_of_plain_prose(self):
+        assert memory_store.auto_tags("the meeting is on Tuesday") == []
+
+    def test_tags_are_stored_and_returned(self, store):
+        ms, emb = store
+        emb.register("the user's editor is vim", _axis(0))
+        ms.store_memory("the user's editor is vim", tags=["preference", "editor"])
+        emb.register("which editor", _axis(0))
+        hits = ms.search_memories("which editor")
+        assert hits and set(hits[0].tags) >= {"preference", "editor"}
+
+    def test_tag_query_finds_tagged_fact(self, store):
+        ms, emb = store
+        emb.register("the user's editor is vim", _axis(0))
+        ms.store_memory("the user's editor is vim", tags=["editor"])
+        # A dense-orthogonal query: only the lexical tag match can find it.
+        emb.register("#editor", _axis(4))
+        hits = ms.search_memories("#editor")
+        assert [h.text for h in hits] == ["the user's editor is vim"]
+        assert "lexical" in hits[0].matched
+
+    def test_hash_token_is_a_query_identifier(self):
+        assert "#editor" in memory_store._query_tokens("#editor")
+
+    def test_tags_do_not_block_dedup_and_merge_instead(self, store):
+        ms, emb = store
+        first = ms.store_memory("the user's editor is vim", tags=["editor"])
+        second = ms.store_memory("the user's editor is vim", tags=["preference"])
+        assert first == second
+        assert ms.count() == 1
+        emb.register("which editor", emb.table["the user's editor is vim"])
+        hits = ms.search_memories("which editor")
+        assert set(hits[0].tags) >= {"editor", "preference"}
+
+    def test_batch_carries_per_fact_tags(self, store):
+        ms, emb = store
+        ms.store_memories_batch(
+            ["fact one about vim", "fact two about emacs"],
+            tags_list=[["editor"], ["other"]],
+        )
+        emb.register("#editor", _axis(5))
+        hits = ms.search_memories("#editor")
+        assert [h.text for h in hits] == ["fact one about vim"]
+
+
 class TestRecallCompatibility:
     def test_recall_memories_still_returns_strings(self, store):
         ms, emb = store
