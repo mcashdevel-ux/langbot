@@ -65,6 +65,9 @@ MMR_LAMBDA = config.get("memory.mmr_lambda", 0.7)
 DEDUP_SIMILARITY = config.get("memory.dedup_similarity", 0.95)
 DEDUP_TOKEN_OVERLAP = config.get("memory.dedup_token_overlap", 0.6)
 LEXICAL_SEARCH = config.get("memory.lexical_search", True)
+# Tags per fact, and whether untagged writes get deterministic fallback tags.
+MAX_TAGS = config.get("memory.max_tags", 5)
+AUTO_TAGS = config.get("memory.auto_tags", True)
 # Reciprocal-rank-fusion constant; 60 is the value from the original RRF paper.
 RRF_K = 60
 
@@ -132,7 +135,7 @@ def _now_iso() -> str:
 _WS_RE = re.compile(r"\s+")
 # Tokens keep the punctuation that makes identifiers identifiers, so
 # "~/code/myapp" and "OPENAI_API_KEY" survive as single searchable units.
-_TOKEN_RE = re.compile(r"[\w~./][\w./~:@+-]*")
+_TOKEN_RE = re.compile(r"[\w~./#][\w./~:@+-]*")
 
 
 def normalize(text: str) -> str:
@@ -185,6 +188,53 @@ def _vector(raw) -> "list[float] | None":
         return None
 
 
+# ------------------------------------------------------------------------------
+# Tags — stored two ways: comma-joined in metadata (Chroma metadata values must be
+# scalars) for display, and as ``#tag`` tokens inside the document so the lexical
+# leg searches them for free. They are never embedded, so they cannot distort
+# semantic similarity, and they stay out of ``norm``, so they cannot block dedup.
+# ------------------------------------------------------------------------------
+_TAG_CLEAN_RE = re.compile(r"[^a-z0-9-]+")
+
+
+def clean_tags(tags) -> "list[str]":
+    """Canonical tag list: lowercase ``[a-z0-9-]``, deduped, capped at MAX_TAGS."""
+    out: "list[str]" = []
+    for raw in tags or []:
+        if not isinstance(raw, str):
+            continue
+        tag = _TAG_CLEAN_RE.sub("-", raw.strip().casefold()).strip("-")
+        if tag and tag not in out:
+            out.append(tag)
+    return out[:MAX_TAGS]
+
+
+_AUTO_TAG_RULES = (
+    ("preference", re.compile(r"\b(prefers?|likes?|favou?rite|wants?)\b", re.I)),
+    ("credentials", re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b"
+                               r"|\b(api.?key|token|password|secret|credential)\b", re.I)),
+    ("web", re.compile(r"https?://", re.I)),
+    ("filesystem", re.compile(r"(?:^|[\s'\"(=])(?:~|\.{1,2})?/[\w.@-]+(?:/[\w.@-]+)+")),
+)
+
+
+def auto_tags(text: str) -> "list[str]":
+    """Deterministic coarse tags for what the fact visibly contains.
+
+    A fallback, not a classifier: it guarantees every fact carries at least the
+    obvious categories even when no tags were supplied.
+    """
+    return [tag for tag, pattern in _AUTO_TAG_RULES if pattern.search(text or "")]
+
+
+def _split_tags(joined: str) -> "list[str]":
+    return [t for t in (joined or "").split(",") if t]
+
+
+def _document(norm: str, tags: "list[str]") -> str:
+    return norm + "".join(f" #{t}" for t in tags)
+
+
 @dataclass
 class Memory:
     """One retrieved fact, with everything needed to judge it."""
@@ -194,19 +244,54 @@ class Memory:
     score: float                    # cosine similarity to the query, 0.0-1.0
     timestamp: str = ""
     source: str = ""                # "manual" | "distilled" | "supabase" | ""
+    tags: "list[str]" = field(default_factory=list)
     matched: "list[str]" = field(default_factory=list)   # "dense" and/or "lexical"
 
 
 # ------------------------------------------------------------------------------
 # Writes
 # ------------------------------------------------------------------------------
-def _metadata(text: str, timestamp: str, source: str) -> dict:
+def _metadata(text: str, timestamp: str, source: str, tags: "list[str]") -> dict:
     return {
         "text": text,
         "norm": normalize(text),
         "timestamp": timestamp,
         "source": source,
+        "tags": ",".join(tags),
     }
+
+
+def _effective_tags(text: str, tags) -> "list[str]":
+    supplied = clean_tags(tags)
+    if AUTO_TAGS:
+        return clean_tags(supplied + auto_tags(text))
+    return supplied
+
+
+def _merge_tags(collection, mem_id: str, tags: "list[str]") -> None:
+    """Fold new tags into an existing row (a duplicate write may know more)."""
+    if not tags:
+        return
+    row = collection.get(ids=[mem_id], include=["metadatas", "embeddings"])
+    metas = row.get("metadatas") or []
+    if not metas or metas[0] is None:
+        return
+    meta = dict(metas[0])
+    merged = clean_tags(_split_tags(meta.get("tags", "")) + tags)
+    if merged == _split_tags(meta.get("tags", "")):
+        return
+    meta["tags"] = ",".join(merged)
+    norm = meta.get("norm") or normalize(meta.get("text", ""))
+    embeds = row.get("embeddings")
+    vector = _vector(embeds[0]) if embeds is not None and len(embeds) else None
+    # The stored vector is passed back unchanged: without it, Chroma re-embeds
+    # the (tag-carrying) document with its own default model.
+    collection.update(
+        ids=[mem_id],
+        embeddings=[vector] if vector is not None else None,
+        metadatas=[meta],
+        documents=[_document(norm, merged)],
+    )
 
 
 def _duplicate_of(collection, text: str, vector) -> "str | None":
@@ -248,7 +333,7 @@ def _duplicate_of(collection, text: str, vector) -> "str | None":
     return None
 
 
-def store_memory(text: str, source: str = "manual") -> str:
+def store_memory(text: str, source: str = "manual", tags: "list[str] | None" = None) -> str:
     """Store one fact and return its id — the *existing* id if it is a duplicate.
 
     Callers get an id either way, so "already known" is not an error; only the
@@ -258,6 +343,7 @@ def store_memory(text: str, source: str = "manual") -> str:
     text = (text or "").strip()
     if not text:
         raise ValueError("cannot store an empty memory")
+    tag_list = _effective_tags(text, tags)
     vector = get_embeddings().embed_query(text)
     collection = get_collection()
     mem_id = str(uuid.uuid4())
@@ -265,12 +351,13 @@ def store_memory(text: str, source: str = "manual") -> str:
         duplicate = _duplicate_of(collection, text, vector)
         if duplicate is not None:
             logger.debug("memory_store: skipped duplicate of %s: %r", duplicate, text[:80])
+            _merge_tags(collection, duplicate, tag_list)
             return duplicate
         collection.add(
             ids=[mem_id],
             embeddings=[vector],
-            documents=[normalize(text)],
-            metadatas=[_metadata(text, _now_iso(), source)],
+            documents=[_document(normalize(text), tag_list)],
+            metadatas=[_metadata(text, _now_iso(), source, tag_list)],
         )
     return mem_id
 
@@ -279,13 +366,15 @@ def store_memories_batch(
     texts: list[str],
     timestamps: "list[str] | None" = None,
     source: str = "distilled",
+    tags_list: "list[list[str]] | None" = None,
 ) -> list[str]:
     """Store many facts with a single ``embed_documents`` call.
 
     ``timestamps`` preserves original times for facts pulled from elsewhere
-    (e.g. Supabase); missing or blank entries fall back to now. The returned ids
-    line up with ``texts``; a duplicate yields the id of the fact it duplicates,
-    and blank entries yield ``""``.
+    (e.g. Supabase); missing or blank entries fall back to now. ``tags_list``
+    supplies per-fact tags, aligned with ``texts``. The returned ids line up
+    with ``texts``; a duplicate yields the id of the fact it duplicates, and
+    blank entries yield ``""``.
     """
     if not texts:
         return []
@@ -293,17 +382,20 @@ def store_memories_batch(
     now = _now_iso()
     stamps = list(timestamps or [])
     stamps += [now] * (len(texts) - len(stamps))
+    all_tags = list(tags_list or [])
+    all_tags += [[] for _ in range(len(texts) - len(all_tags))]
     collection = get_collection()
     ids: "list[str]" = []
     pending_ids, pending_vectors, pending_docs, pending_metas = [], [], [], []
     seen: "dict[str, str]" = {}
     with _write_lock:
-        for text, vector, stamp in zip(texts, vectors, stamps):
+        for text, vector, stamp, tags in zip(texts, vectors, stamps, all_tags):
             text = (text or "").strip()
             if not text:
                 ids.append("")
                 continue
             norm = normalize(text)
+            tag_list = _effective_tags(text, tags)
             if norm in seen:                      # duplicate within this batch
                 ids.append(seen[norm])
                 continue
@@ -311,14 +403,15 @@ def store_memories_batch(
             if duplicate is not None:
                 seen[norm] = duplicate
                 ids.append(duplicate)
+                _merge_tags(collection, duplicate, tag_list)
                 continue
             mem_id = str(uuid.uuid4())
             seen[norm] = mem_id
             ids.append(mem_id)
             pending_ids.append(mem_id)
             pending_vectors.append(vector)
-            pending_docs.append(norm)
-            pending_metas.append(_metadata(text, stamp or now, source))
+            pending_docs.append(_document(norm, tag_list))
+            pending_metas.append(_metadata(text, stamp or now, source, tag_list))
         if pending_ids:
             collection.add(
                 ids=pending_ids,
@@ -344,7 +437,9 @@ def _query_tokens(query: str) -> "list[str]":
     """
     scored = []
     for token in _TOKEN_RE.findall(normalize(query)):
-        identifier = any(c in token for c in "./~:@_-") or any(c.isdigit() for c in token)
+        identifier = (token.startswith("#")            # explicit tag lookup
+                      or any(c in token for c in "./~:@_-")
+                      or any(c.isdigit() for c in token))
         if identifier or len(token) >= 5:
             scored.append(token)
     # Longest first: the most specific token is the most selective filter.
@@ -357,6 +452,7 @@ def _candidate(mem_id, meta, vector, score) -> "dict":
         "text": (meta or {}).get("text", ""),
         "timestamp": (meta or {}).get("timestamp", ""),
         "source": (meta or {}).get("source", ""),
+        "tags": _split_tags((meta or {}).get("tags", "")),
         "vector": vector,
         "score": score,
         "rrf": 0.0,
@@ -502,6 +598,7 @@ def search_memories(
             score=round(c["score"], 4),
             timestamp=c["timestamp"],
             source=c["source"],
+            tags=c["tags"],
             matched=sorted(set(c["matched"])),
         )
         for c in _mmr(kept, n)

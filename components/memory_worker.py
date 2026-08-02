@@ -67,9 +67,11 @@ Tool results this turn:
 {job.tool_context}
 Assistant response: {job.ai_text}
 
-Return ONLY a JSON array of strings, each a standalone factual statement grounded in
-the tool results above. If nothing is clearly supported by evidence, return [].
-Do not include explanations, markdown, or extra text.
+Return ONLY a JSON array of objects, each {{"fact": "...", "tags": ["..."]}} where
+"fact" is a standalone factual statement grounded in the tool results above and
+"tags" is 1-3 short lowercase category words (e.g. "preference", "filesystem",
+"credentials", "web", "project"). If nothing is clearly supported by evidence,
+return []. Do not include explanations, markdown, or extra text.
 /no_think
 """  # /no_think disables Qwen3-style reasoning blocks; harmless to other models.
 
@@ -80,10 +82,15 @@ _LIST_KEYS = ("facts", "memories", "content", "items", "results", "data", "knowl
 _ARRAY_RE = re.compile(r"\[.*?\]", re.DOTALL)
 
 
-def _strings(items) -> "list[str] | None":
-    """Coerce a list of facts to clean strings, accepting {"fact": "..."} entries."""
+def _entries(items) -> "list[tuple[str, list[str]]] | None":
+    """Coerce a fact list to (text, tags) pairs.
+
+    Accepts bare strings (no tags) and {"fact": "...", "tags": [...]} objects,
+    since models fall back to the plain-string shape.
+    """
     out = []
     for item in items:
+        tags: "list[str]" = []
         if isinstance(item, str):
             text = item
         elif isinstance(item, dict):
@@ -94,20 +101,31 @@ def _strings(items) -> "list[str] | None":
             )
             if text is None:
                 return None
+            raw_tags = item.get("tags")
+            if isinstance(raw_tags, list):
+                tags = [t for t in raw_tags if isinstance(t, str)]
+            elif isinstance(raw_tags, str):
+                tags = [raw_tags]
         else:
             return None
         text = text.strip()
         if text:
-            out.append(text)
+            out.append((text, tags))
     return out
 
 
 def parse_facts(raw, _depth: int = 0) -> "list[str] | None":
+    """``parse_fact_entries`` reduced to fact text, for callers that want strings."""
+    entries = parse_fact_entries(raw, _depth)
+    return None if entries is None else [text for text, _ in entries]
+
+
+def parse_fact_entries(raw, _depth: int = 0) -> "list[tuple[str, list[str]]] | None":
     """Read a fact list out of the distiller's output, or None if unreadable.
 
-    The prompt asks for a bare JSON array of strings, but small local models
-    return it wrapped in a chat envelope, nested under an object key, as objects
-    instead of strings, embedded in prose, or as a Markdown bullet list. Since a
+    The prompt asks for a bare JSON array of {"fact", "tags"} objects, but small
+    local models return it wrapped in a chat envelope, nested under an object
+    key, as bare strings, embedded in prose, or as a Markdown bullet list. Since a
     miss silently loses the whole turn's knowledge, every one of those shapes is
     accepted. An empty list is a valid answer ("nothing worth storing") and is
     distinct from None ("could not read this at all").
@@ -118,7 +136,7 @@ def parse_facts(raw, _depth: int = 0) -> "list[str] | None":
     # A chat envelope may itself contain fences/JSON, hence the recursion.
     inner = unwrap_content(text)
     if inner is not None:
-        return parse_facts(inner, _depth + 1)
+        return parse_fact_entries(inner, _depth + 1)
 
     try:
         parsed = json.loads(text)
@@ -126,21 +144,21 @@ def parse_facts(raw, _depth: int = 0) -> "list[str] | None":
         parsed = None
 
     if isinstance(parsed, list):
-        return _strings(parsed)
+        return _entries(parsed)
     if isinstance(parsed, dict):
         for key in _LIST_KEYS:
             value = parsed.get(key)
             if isinstance(value, list):
-                return _strings(value)
+                return _entries(value)
             if isinstance(value, str):
-                return parse_facts(value, _depth + 1)
+                return parse_fact_entries(value, _depth + 1)
         # Any other single list value, e.g. {"extracted_facts": [...]}.
         lists = [v for v in parsed.values() if isinstance(v, list)]
         if len(lists) == 1:
-            return _strings(lists[0])
+            return _entries(lists[0])
         return None
     if isinstance(parsed, str):
-        return parse_facts(parsed, _depth + 1)
+        return parse_fact_entries(parsed, _depth + 1)
 
     # Not JSON as a whole: an array embedded in prose, else a bullet list.
     match = _ARRAY_RE.search(text)
@@ -150,11 +168,11 @@ def parse_facts(raw, _depth: int = 0) -> "list[str] | None":
         except json.JSONDecodeError:
             embedded = None
         if isinstance(embedded, list):
-            return _strings(embedded)
+            return _entries(embedded)
     bullets = [m.group(1) for m in (_BULLET_RE.match(ln) for ln in text.splitlines()) if m]
     if bullets:
         logger.debug("memory_worker: read %d fact(s) from a bullet list", len(bullets))
-        return bullets
+        return [(b, []) for b in bullets]
     return None
 
 
@@ -215,26 +233,26 @@ class MemoryWorker:
                     self._q.task_done()
 
     def _process(self, batch: "list[DistillJob]") -> None:
-        facts = []
+        entries = []
         for job in batch:
             try:
-                facts.extend(self._distill(job))
+                entries.extend(self._distill(job))
             except Exception:
                 logger.exception("memory_worker: job failed, skipping")
-        if facts:
-            self._store(facts)
+        if entries:
+            self._store(entries)
 
-    def _store(self, facts: "list[str]") -> None:
+    def _store(self, entries: "list[tuple[str, list[str]]]") -> None:
         store_fn = self._store_fn
         if store_fn is None:
             from .memory_store import store_memories_batch
 
             store_fn = store_memories_batch
-        store_fn(facts)
+        store_fn([text for text, _ in entries], tags_list=[tags for _, tags in entries])
 
-    def _distill(self, job: DistillJob) -> "list[str]":
+    def _distill(self, job: DistillJob) -> "list[tuple[str, list[str]]]":
         raw = self._llm.invoke(_distillation_prompt(job)).content
-        facts = parse_facts(raw)
+        facts = parse_fact_entries(raw)
         if facts is not None and len(facts) > MAX_FACTS_PER_TURN:
             logger.debug("memory_worker: keeping %d of %d distilled fact(s)",
                          MAX_FACTS_PER_TURN, len(facts))

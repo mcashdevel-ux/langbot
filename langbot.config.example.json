@@ -37,7 +37,9 @@
     "mmr_lambda": 0.7,
     "dedup_similarity": 0.95,
     "dedup_token_overlap": 0.6,
-    "lexical_search": true
+    "lexical_search": true,
+    "max_tags": 5,
+    "auto_tags": true
   },
 
   "tools": {

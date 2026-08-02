@@ -118,7 +118,7 @@ Precedence for a single setting: **environment variable > config file > default.
 | `paths` | `checkpoint_db`, `chroma_dir`, `scratch_dir`, `tasks_dir`, `vault_dir`, `log_file` | keep inside `./memory/` per `MEMORY_POLICY.md` |
 | `logging` | `level`, `console`, `max_bytes`, `backup_count` | log destination and verbosity (see below) |
 | `memory` | `collection_name`, `embedding_model`, `embedding_device`, `worker_queue_size`, `worker_batch_size`, `worker_shutdown_timeout`, `max_facts_per_turn` | background distiller + vector store |
-| `memory` (search) | `min_similarity`, `recall_overfetch`, `mmr_lambda`, `dedup_similarity`, `dedup_token_overlap`, `lexical_search` | retrieval precision (see below) |
+| `memory` (search) | `min_similarity`, `recall_overfetch`, `mmr_lambda`, `dedup_similarity`, `dedup_token_overlap`, `lexical_search`, `max_tags`, `auto_tags` | retrieval precision and tags (see below) |
 | `tools` | `read_inline_chars`, `grep_inline_lines`, `manyfiles_inline_chars`, `scratch_save_chars`, `max_output_chars` | how much tool output goes inline vs. to scratch |
 | `web` | `search_snippet_chars`, `search_max_results`, `fetch_inline_chars`, `fetch_save_chars`, `jina_timeout`, `jina_retry_on_429`, `searxng_settings_path`, `searxng_source_dir` | search/fetch behaviour |
 | `routing` | `max_nudges_per_turn` | autonomy nudge budget per turn |
@@ -173,9 +173,28 @@ What a lookup does, and the knobs for each part:
 | `lexical_search` | `true` | run a literal-token leg beside the dense one and fuse the two by reciprocal rank; this is what finds `~/code/myapp`, `OPENAI_API_KEY` or `port 8080`, which sentence embeddings rank poorly |
 | `dedup_similarity` | `0.95` | how close a new fact must be to an existing one to be treated as a duplicate and not stored again |
 | `dedup_token_overlap` | `0.6` | vocabulary overlap also required for that duplicate verdict; on top of it the two must name the same identifiers, so `port 8080` never absorbs `port 8081` |
+| `max_tags` | `5` | tags kept per fact |
+| `auto_tags` | `true` | give untagged facts deterministic fallback tags (`preference`, `filesystem`, `credentials`, `web`) based on what they visibly contain |
 
-`/knowledge <query>` prints each hit's score, matched legs, source and timestamp — the
-view to use when tuning `min_similarity` for your own store.
+`/knowledge <query>` prints each hit's score, matched legs, tags, source and timestamp —
+the view to use when tuning `min_similarity` for your own store.
+
+### Tags
+
+Every fact can carry short category tags. They come from three places: an explicit
+`tags` argument to the `remember` tool, trailing `#tag` tokens on `/save`
+(`/save prefers dark mode #preference #ui`), and the background distiller, which asks
+the model for `{"fact", "tags"}` objects; deterministic fallback rules cover facts
+that arrive untagged.
+
+Tags are stored two ways: comma-joined in the row's metadata (for display) and as
+`#tag` tokens inside the lexical document — so tag search is just the existing
+lexical leg. A plain query whose words match a tag finds tagged facts, and a `#tag`
+token makes it exact: `recall("#preference")` or `/knowledge #preference` returns only
+facts carrying that tag. Tags are never embedded, so they cannot distort semantic
+similarity, and they are ignored by dedup — a duplicate write merges its new tags
+into the existing fact instead. Rows written before tags existed keep working,
+simply untagged.
 
 ## Usage
 
