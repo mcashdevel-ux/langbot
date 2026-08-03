@@ -51,7 +51,8 @@ from components.memory_store import (
     search_memories as _search_memories,
     store_memory as _store_memory,
 )
-from components.memory_worker import DistillJob, MemoryWorker
+from components.memory_worker import DistillJob, MemoryWorker, parse_fact_entries
+from components.fallback_llm import build as _build_distill_llm
 from components.warmup import Warmup
 from components.file_ops import (
     read_file as _read_file,
@@ -127,7 +128,14 @@ _warmup = Warmup({
 # ------------------------------------------------------------------------------
 # 2. Semantic Memory Store (components/memory_store.py) + background distiller
 # ------------------------------------------------------------------------------
-_memory_worker = MemoryWorker(llm=llm)
+# Distillation runs on its own tier chain (hosted free-tier models first, this
+# local model last), because small local models are the weakest link at returning
+# the strict JSON the distiller needs. See components/fallback_llm.py.
+_distill_llm = _build_distill_llm(
+    llm,
+    validate=lambda text: parse_fact_entries(text) is not None,
+)
+_memory_worker = MemoryWorker(llm=_distill_llm)
 
 # ------------------------------------------------------------------------------
 # 3. Tools (original + memory)
@@ -702,6 +710,7 @@ def _handle_slash(text: str, config: dict) -> bool:
                              f"fetch {_web_tools.FETCH_INLINE_CHARS}")
         ui.kv("memory worker", f"queue {_memory_worker_mod.MAX_QUEUE_SIZE}, "
                                f"batch {_memory_worker_mod.MAX_BATCH}")
+        ui.kv("distillation", _distill_llm.describe())
         ui.kv("log file", str(_log_path() or "(stderr)"))
         return False
     if cmd == "info":
@@ -718,6 +727,7 @@ def _handle_slash(text: str, config: dict) -> bool:
         ui.kv("memories", str(_memory_count()))
         ui.kv("memory queue depth", str(_memory_worker.qsize()))
         ui.kv("memory jobs dropped", str(_memory_worker.dropped_count()))
+        ui.kv("distillation", _distill_llm.describe())
         ui.kv("warmup", _warmup.summary())
         ui.kv("vault creds", str(len(_VAULT_ENV_LOADED)))
         ui.kv("bg tasks", str(len(_tasks.manager.list())))

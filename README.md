@@ -122,6 +122,7 @@ Precedence for a single setting: **environment variable > config file > default.
 | `memory` | `collection_name`, `embedding_model`, `embedding_device`, `worker_queue_size`, `worker_batch_size`, `worker_shutdown_timeout`, `max_facts_per_turn` | background distiller + vector store |
 | `memory` (search) | `min_similarity`, `recall_overfetch`, `mmr_lambda`, `dedup_similarity`, `dedup_token_overlap`, `lexical_search`, `max_tags`, `auto_tags` | retrieval precision and tags (see below) |
 | `memory` (distiller) | `non_distillable_tools` | tools whose output is machine state, so the turn skips its distillation call |
+| `distill` | `tiers`, `cooldown_seconds`, `temperature`, `timeout`, `reserve_output_tokens` | hosted models tried for distillation before the local one (see below) |
 | `context` | `budget_tokens`, `reserve_tokens`, `compact_at`, `keep_last_messages`, `summary_max_chars`, `chars_per_token` | history compaction (see below) |
 | `tools` | `read_inline_chars`, `grep_inline_lines`, `manyfiles_inline_chars`, `max_output_chars` | how much tool output goes inline; the full result always reaches scratch |
 | `tools` (binding) | `dynamic_binding`, `core` | which tool schemas are sent each step (see below) |
@@ -148,6 +149,9 @@ Environment variables (override the config file):
 - `LANGBOT_LOG_FILE` — where log records are written (default `./memory/langbot.log`).
 - `LANGBOT_LOG_LEVEL` — log verbosity (default `WARNING`).
 - `LANGBOT_LOG_CONSOLE` — set to `1` to also stream log records to stderr.
+- `GROQ_API_KEY` — enables the hosted distillation tiers (see below). Without it,
+  distillation runs on the local model exactly as before. The vault loads it into the
+  environment automatically once stored (`vault store GROQ_API_KEY`).
 
 ### Logs
 
@@ -206,6 +210,43 @@ What a lookup does, and the knobs for each part:
 
 `/knowledge <query>` prints each hit's score, matched legs, tags, source and timestamp —
 the view to use when tuning `min_similarity` for your own store.
+
+### Distillation tiers
+
+Distillation is the one LLM call that is both off the critical path and cheap — a
+truncated turn summary in, a short JSON array of facts out — and it is where a small
+local model is weakest, since an unparseable answer silently loses the turn's
+knowledge. So it runs on its own fallback chain instead of the agent's model, tried
+in order, with the local model always last:
+
+| Tier | Free-tier limits (RPM / RPD / TPM / TPD) | Why here |
+|------|------------------------------------------|----------|
+| `llama-3.3-70b-versatile` | 30 / 1K / 12K / 100K | best free instruction-follower |
+| `openai/gpt-oss-120b` | 30 / 1K / 8K / 200K | comparable, separate per-model quota |
+| `qwen/qwen3.6-27b` | 30 / 1K / 8K / 200K | native to the prompt's `/no_think` hint |
+| `llama-3.1-8b-instant` | 30 / 14.4K / 6K / 500K | weakest, deepest daily quota |
+| local model | — | always available, no network, no quota |
+
+Quotas are per model *and* per organization, so the chain multiplies the available
+budget rather than re-hitting one bucket. Limits are respected *before* a call, not
+discovered by failing one: each tier keeps sliding 60-second and 24-hour windows of
+the requests and tokens it has spent, and Groq's own
+[rate-limit headers](https://console.groq.com/docs/rate-limits)
+(`x-ratelimit-remaining-tokens` is per minute, `x-ratelimit-remaining-requests` is
+per **day**) override that local accounting on every response. A tier that would not
+fit is skipped silently; one that fails, gets a 429, or returns output the fact parser
+cannot read is put on a cooldown — `retry-after` when the server sends one, otherwise
+`distill.cooldown_seconds`. `/health` and `/config` print the chain with each tier's
+current state.
+
+A tier without its `api_key_env` set is skipped, so the default chain is inert until
+`GROQ_API_KEY` exists. Setting `"distill": {"tiers": []}` disables hosted distillation
+entirely and leaves the local model doing the work.
+
+Note what a hosted tier implies: the distillation prompt — the user request, the
+assistant's reply, and the turn's tool output, each truncated — leaves the machine.
+Everything else (the agent's own turns, the memory store, embeddings) stays local. Keep
+`tiers` empty if that trade is not acceptable for your data.
 
 ### Tags
 
@@ -317,6 +358,7 @@ components/
   scratch.py            # shared on-disk scratchpad + read_scratch paging
   memory_store.py       # embeddings + Chroma collection (store/recall, write lock)
   memory_worker.py      # background distillation queue (off the graph's critical path)
+  fallback_llm.py       # tiered distillation LLM: hosted models (rate-limit aware) then local
   routing.py            # agent routing, autonomy nudges, duplicate-answer guard
   web_tools.py          # search_web / fetch_url (scratchpad-backed)
   engines.py            # SearXNG engine adapter used by web_tools
