@@ -16,10 +16,16 @@ Budgets are measured in tokens, not messages: one grep result can outweigh
 twenty turns of conversation. ``tiktoken`` is used when available (it ships with
 langchain-openai) and a 4-chars-per-token approximation otherwise; both are
 estimates for a local model's own tokenizer, so the threshold leaves headroom.
+
+The counters at the bottom exist because two of this module's constants are
+guesses that only measurement can settle: whether ``reserve_tokens`` (8192) is
+still right now that tool schemas are bound per turn, and what compaction costs
+the server's prompt cache. ``stats()`` is what ``/health`` reports.
 """
 
 import json
 import logging
+import threading
 
 from .config import config
 
@@ -162,3 +168,101 @@ def compact(messages, summarize, previous_summary: str = "",
     if not summary:
         return [], list(messages), previous_summary
     return older, recent, summary[:SUMMARY_MAX_CHARS]
+
+
+# ---------------------------------------------------------------------------
+# Instrumentation
+# ---------------------------------------------------------------------------
+# Prompt cost is split the way the budget is: what the reserve is meant to cover
+# (the system prompt, the rolling summary, the bound tool schemas, and the answer
+# still to be generated) versus the conversation it is protecting. `prefix` is the
+# leading run of messages identical to the previous step's, i.e. what a server
+# with prompt caching can reuse instead of reprocessing.
+_stats = {
+    "steps": 0,
+    "peak_prompt": 0,
+    "peak_history": 0,
+    "peak_overhead": 0,      # system + summary + tool schemas: what the reserve covers
+    "peak_schemas": 0,
+    "prefix_reused": 0,      # tokens the server could keep, summed over steps
+    "prefix_reprocessed": 0, # tokens it had to read again
+    "compactions": 0,
+    "tokens_dropped": 0,
+}
+_stats_lock = threading.Lock()
+
+
+def shared_prefix_tokens(previous, current) -> int:
+    """Tokens of the leading messages identical in both prompts.
+
+    Prompt caching is prefix-based, so the first difference invalidates everything
+    after it: one changed leading message costs a full reprocess of the window.
+    """
+    total = 0
+    for before, after in zip(previous, current):
+        if before != after:
+            break
+        total += estimate_tokens(before)
+    return total
+
+
+def record_step(history_tokens: int, overhead_tokens: int, schema_tokens: int = 0,
+                prefix_tokens: int = 0) -> None:
+    """Record one agent step's prompt composition."""
+    prompt = history_tokens + overhead_tokens
+    with _stats_lock:
+        _stats["steps"] += 1
+        _stats["peak_prompt"] = max(_stats["peak_prompt"], prompt)
+        _stats["peak_history"] = max(_stats["peak_history"], history_tokens)
+        _stats["peak_overhead"] = max(_stats["peak_overhead"], overhead_tokens)
+        _stats["peak_schemas"] = max(_stats["peak_schemas"], schema_tokens)
+        _stats["prefix_reused"] += min(prefix_tokens, prompt)
+        _stats["prefix_reprocessed"] += max(0, prompt - prefix_tokens)
+    logger.debug(
+        "context: step prompt %d tokens (history %d, overhead %d of which schemas %d), "
+        "cache prefix %d", prompt, history_tokens, overhead_tokens, schema_tokens,
+        prefix_tokens,
+    )
+
+
+def record_compaction(dropped_messages: int, dropped_tokens: int) -> None:
+    with _stats_lock:
+        _stats["compactions"] += 1
+        _stats["tokens_dropped"] += dropped_tokens
+    # The rolling summary lives inside the leading system message, so rewriting it
+    # changes the prompt's first token: the next step reuses nothing and reprocesses
+    # the whole window. That is the trade compaction makes, and the numbers above are
+    # how to judge it.
+    logger.info(
+        "context: compacted %d messages (%d tokens) into the summary; "
+        "the next step's prompt cache starts from zero",
+        dropped_messages, dropped_tokens,
+    )
+
+
+def stats() -> dict:
+    with _stats_lock:
+        return dict(_stats)
+
+
+def reset_stats() -> None:
+    with _stats_lock:
+        for key in _stats:
+            _stats[key] = 0
+
+
+def stats_summary() -> str:
+    """One line for `/health`, aimed at the two open questions: is the reserve the
+    right size, and what is compaction costing the prompt cache?"""
+    current = stats()
+    if not current["steps"]:
+        return "no agent steps yet"
+    total_prefix = current["prefix_reused"] + current["prefix_reprocessed"]
+    reuse = 100 * current["prefix_reused"] / total_prefix if total_prefix else 0
+    return (
+        f"{current['steps']} steps, peak prompt {current['peak_prompt']} tokens "
+        f"(history {current['peak_history']}, overhead {current['peak_overhead']} "
+        f"of reserve {RESERVE_TOKENS}, schemas {current['peak_schemas']}), "
+        f"cache reuse {reuse:.0f}%, "
+        f"{current['compactions']} compactions dropping {current['tokens_dropped']} tokens"
+    )
