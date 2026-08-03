@@ -77,7 +77,7 @@ from components import (
 )
 from components import context_budget as _ctx
 from components.tool_router import select_tools as _select_tools
-from components.routing import RECURSION_LIMIT, nudge_agent, route_agent
+from components.routing import RECURSION_LIMIT, is_nudge, nudge_agent, route_agent
 from components.tool_call_repair import repair_message
 
 import components.console as ui
@@ -406,10 +406,17 @@ class AgentState(MessagesState):
 
 
 def agent(state: AgentState):
-    messages = [system_prompt]
     summary = state.get("summary") or ""
+    # One system message, always first: served chat templates commonly reject a
+    # second one (llama.cpp: "System message must be at the beginning"), so the
+    # rolling summary is folded into the prompt rather than sent beside it.
     if summary:
-        messages.append(SystemMessage(content=f"Earlier in this session:\n{summary}"))
+        lead = SystemMessage(
+            content=f"{system_prompt.content}\n\nEarlier in this session:\n{summary}"
+        )
+    else:
+        lead = system_prompt
+    messages = [lead]
     messages += state["messages"]
     response = _llm_for(state["messages"]).invoke(messages)
     # Small local models often print the call they meant to make instead of
@@ -446,7 +453,10 @@ def distill_knowledge(state: AgentState) -> AgentState:
     treating it as such is how greetings ended up in long-term memory. Tools in
     ``NON_DISTILLABLE_TOOLS`` are excluded for the same reason.
     """
-    user_msgs = [m for m in state["messages"] if isinstance(m, HumanMessage)]
+    # Nudges are HumanMessages too (see components/routing.py); distilling one
+    # would file the guardrail's own text as the user's request.
+    user_msgs = [m for m in state["messages"]
+                 if isinstance(m, HumanMessage) and not is_nudge(m)]
     ai_msgs = [m for m in state["messages"] if m.type == "ai" and m.content]
 
     if not user_msgs or not ai_msgs:
@@ -454,7 +464,8 @@ def distill_knowledge(state: AgentState) -> AgentState:
 
     # Find the index of the last HumanMessage so we only inspect the current turn.
     last_human_idx = max(
-        i for i, m in enumerate(state["messages"]) if isinstance(m, HumanMessage)
+        i for i, m in enumerate(state["messages"])
+        if isinstance(m, HumanMessage) and not is_nudge(m)
     )
     turn_msgs = state["messages"][last_human_idx:]
     tool_results = [
