@@ -150,6 +150,14 @@ class TestVaultStore:
         assert unlocked_store.put("ONE", "v")
         assert unlocked_store.put("TWO", "v") is False
 
+    def test_capacity_does_not_block_updating_an_existing_credential(
+            self, unlocked_store, monkeypatch):
+        # Overwriting adds nothing, so the cap has no business rejecting a rotation.
+        monkeypatch.setattr(vault, "MAX_CREDENTIALS", 1)
+        assert unlocked_store.put("ONE", "v")
+        assert unlocked_store.put("ONE", "rotated")
+        assert unlocked_store.get("ONE") == "rotated"
+
     def test_remove(self, unlocked_store):
         unlocked_store.put("TEMP", "v")
         assert unlocked_store.remove("TEMP") is True
@@ -265,18 +273,30 @@ class TestRedactionFilter:
 
 
 # ---------------------------------------------------------------------------
-# _mask_value helper
+# mask_value helper
 # ---------------------------------------------------------------------------
 
 class TestMaskValue:
     def test_empty(self):
-        assert vault._mask_value("") == ""
+        assert vault.mask_value("") == ""
 
     def test_short(self):
-        assert vault._mask_value("abcd") == "ab**"
+        assert vault.mask_value("abcd") == "ab****"
 
     def test_long(self):
-        assert vault._mask_value("abcdefghij") == "abcd**ghij"
+        assert vault.mask_value("abcdefghij") == "abcd...ghij"
+
+    def test_the_mask_does_not_reveal_how_long_the_secret_is(self):
+        # Fixed-width mask: an asterisk per hidden character would narrow the search
+        # space for the value itself.
+        assert vault.mask_value("abcd" + "x" * 100 + "wxyz") == vault.mask_value(
+            "abcd" + "x" * 8 + "wxyz"
+        )
+
+    def test_get_masked_value_uses_the_same_helper(self, unlocked_store):
+        unlocked_store.put("K", "abcdefghij")
+        rf = vault.RedactionFilter(unlocked_store)
+        assert rf.get_masked_value("K") == vault.mask_value("abcdefghij")
 
 
 # ---------------------------------------------------------------------------

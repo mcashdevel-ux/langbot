@@ -126,7 +126,7 @@ Precedence for a single setting: **environment variable > config file > default.
 | `context` | `budget_tokens`, `reserve_tokens`, `compact_at`, `keep_last_messages`, `summary_max_chars`, `chars_per_token` | history compaction (see below) |
 | `tools` | `read_inline_chars`, `grep_inline_lines`, `manyfiles_inline_chars`, `max_output_chars` | how much tool output goes inline; the full result always reaches scratch |
 | `tools` (binding) | `dynamic_binding`, `core` | which tool schemas are sent each step (see below) |
-| `web` | `search_snippet_chars`, `search_max_results`, `fetch_inline_chars`, `jina_timeout`, `jina_retry_on_429`, `searxng_settings_path`, `searxng_source_dir` | search/fetch behaviour |
+| `web` | `search_snippet_chars`, `search_max_results`, `fetch_inline_chars`, `jina_timeout`, `jina_retry_on_429`, `searxng_settings_path`, `searxng_source_dir`, `searxng_auto_clone` | search/fetch behaviour; `searxng_auto_clone` allows the first search to clone the SearXNG source if it isn't found (set `false` to require it be present) |
 | `routing` | `max_nudges_per_turn`, `recursion_limit`, `stagnation_guard`, `stagnation_exempt_tools` | nudges (not tool rounds) allowed per turn; graph steps per turn (two per tool round); repeated-call guard (see below) |
 | `compat` | `repair_json_tool_calls`, `repair_max_candidates` | recover tool calls from models that print them as text (see below) |
 | `housekeeping` | `enabled`, `scratch_max_age_days`, `scratch_max_total_mb`, `checkpoint_keep_threads` | start-up disk sweep (see below) |
