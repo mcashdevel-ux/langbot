@@ -19,7 +19,9 @@ long-term memory (Chroma + sentence-transformers).
   `ToolNode`, and an automatic knowledge-distillation node that extracts durable facts
   from each exchange into long-term memory. Distillation is handed to a background
   worker (`components/memory_worker.py`), so it never blocks the REPL from returning;
-  `/health` shows its queue depth and dropped-job count.
+  `/health` shows its queue depth and dropped-job count. The embedding model and
+  vector store are warmed on a background thread (`components/warmup.py`) so the
+  prompt appears immediately; `/health` reports their state.
 - **Long-term memory** — Chroma vector store (`agent_memory_chroma/`) with
   `remember` / `recall` tools plus automatic distillation, all behind
   `components/memory_store.py`. Memory is only ever read when the model asks for it
