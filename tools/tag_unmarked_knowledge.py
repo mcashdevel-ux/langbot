@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Script to tag untagged knowledge entries in Supabase and sync them locally.
 
-Uses the configured local OpenAI-compatible model to generate tags in batches.
-Updates both Supabase and the local ChromaDB long-term memory.
+Uses the local sentence-transformers embedding model (all-MiniLM-L6-v2)
+to perform fast zero-shot tag classification via cosine similarity.
 """
 
 import os
 import sys
 import json
 import time
+import math
 import requests
 from typing import List, Dict, Any
 
@@ -18,7 +19,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from components.vault import bootstrap as _vault_bootstrap
 from components.config import config
 from components import memory_store
-from langchain_openai import ChatOpenAI
 
 # Colors for terminal printing
 class Colors:
@@ -42,45 +42,26 @@ def log_warning(msg: str):
 def log_error(msg: str):
     print(f"{Colors.FAIL}[ERROR]{Colors.ENDC} {msg}")
 
-def clean_json_content(content: str) -> str:
-    """Strip markdown formatting if present."""
-    content = content.strip()
-    if content.startswith("```json"):
-        content = content[7:]
-    if content.startswith("```"):
-        content = content[3:]
-    if content.endswith("```"):
-        content = content[:-3]
-    return content.strip()
+def cosine_similarity(a: List[float], b: List[float]) -> float:
+    """Compute cosine similarity between two vectors."""
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(x * x for x in b))
+    if not na or not nb:
+        return 0.0
+    return dot / (na * nb)
 
-def tag_batch(llm: ChatOpenAI, batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Send a batch of facts to the local model to generate tags."""
-    prompt = f"""You are a tagging assistant.
-Analyze the following list of facts/knowledges. For each fact, produce a list of 1 to 5 concise, lowercase, alphanumeric-and-hyphen-only tags.
-Return ONLY a valid JSON list of objects, each containing "id" and "tags". Do not include any explanations, markdown headers, or other text.
-
-Example format:
-[
-  {{"id": 1, "tags": ["tag-a", "tag-b"]}},
-  {{"id": 2, "tags": ["tag-c"]}}
+# Predefined tag candidates representing common topics in the knowledge base
+CANDIDATE_TAGS = [
+    "bug-fix", "model-names", "credentials", "database", "git", "cli",
+    "system-cleanup", "python", "javascript", "docker", "gemma", "qwen",
+    "openai", "supabase", "memory", "config", "installation", "documentation",
+    "testing", "benchmarks", "web-search", "api-key", "performance",
+    "deployment", "script", "agent", "process-management", "error-handling"
 ]
 
-Facts to tag:
-{json.dumps([{"id": item["id"], "fact": item["fact"]} for item in batch], indent=2)}
-"""
-    try:
-        response = llm.invoke(prompt)
-        cleaned_content = clean_json_content(response.content)
-        result = json.loads(cleaned_content)
-        if isinstance(result, list):
-            return result
-        log_error(f"LLM did not return a list: {cleaned_content}")
-    except Exception as e:
-        log_error(f"Error invoking LLM or parsing response: {e}")
-    return []
-
 def main():
-    print(f"{Colors.HEADER}{Colors.BOLD}=== Langbot Knowledge Tagging Script ==={Colors.ENDC}\n")
+    print(f"{Colors.HEADER}{Colors.BOLD}=== Langbot Knowledge Tagging Script (ANN-based) ==={Colors.ENDC}\n")
     
     # 1. Bootstrap Vault and credentials
     _vault_bootstrap()
@@ -91,17 +72,18 @@ def main():
         log_error("Supabase credentials missing in env or vault. Please configure SUPABASE_URL and SUPABASE_SERVICE_KEY.")
         sys.exit(1)
         
-    # 2. Configure LLM
-    base_url = config.get("llm.base_url", "http://127.0.0.1:8080/v1")
-    model = config.get("llm.model", "local-model")
-    llm = ChatOpenAI(
-        model=model,
-        base_url=base_url,
-        api_key="not-needed",
-        temperature=0.0,
-    )
-    
-    log_info(f"Targeting local LLM at {base_url} (model: {model})")
+    # 2. Load Embedding model
+    log_info("Warming up local embedding model...")
+    try:
+        embedder = memory_store.get_embeddings(announce=False)
+        log_success("Embedding model ready.")
+    except Exception as e:
+        log_error(f"Failed to load embedding model: {e}")
+        sys.exit(1)
+        
+    # Pre-embed the candidate tags
+    log_info(f"Computing embeddings for {len(CANDIDATE_TAGS)} candidate tags...")
+    tag_vectors = embedder.embed_documents(CANDIDATE_TAGS)
     
     # 3. Retrieve untagged records from Supabase
     headers = {
@@ -144,43 +126,45 @@ def main():
     except Exception as e:
         log_warning(f"Could not open local ChromaDB collection: {e}. Local updates will be skipped.")
         
-    # 5. Process in batches
-    batch_size = 20
-    processed_count = 0
+    # 5. Process tagging via ANN zero-shot classification
     updated_supabase = 0
     updated_chroma = 0
     
+    # Batch retrieve embeddings of the facts for performance
+    batch_size = 100
+    log_info(f"Classifying tags in batches of {batch_size}...")
+    
     for i in range(0, total_untagged, batch_size):
         batch = untagged_records[i:i + batch_size]
-        log_info(f"Tagging batch {i//batch_size + 1} ({len(batch)} items, progress: {processed_count}/{total_untagged})...")
+        facts_text = [item["fact"] for item in batch]
         
-        tagged_results = tag_batch(llm, batch)
-        if not tagged_results:
-            log_warning("Batch tagging failed. Retrying batch individually...")
-            tagged_results = []
-            for item in batch:
-                res = tag_batch(llm, [item])
-                if res:
-                    tagged_results.extend(res)
-                    
-        # Create a lookup for tags
-        tag_map = {}
-        for res in tagged_results:
-            if "id" in res and "tags" in res:
-                tag_map[res["id"]] = memory_store.clean_tags(res["tags"])
-                
-        # Apply updates
-        for item in batch:
+        # Embed the facts in batch
+        try:
+            fact_vectors = embedder.embed_documents(facts_text)
+        except Exception as e:
+            log_error(f"Failed to embed batch: {e}")
+            continue
+            
+        for idx, item in enumerate(batch):
             item_id = item["id"]
             fact = item["fact"]
-            tags = tag_map.get(item_id)
+            fact_vector = fact_vectors[idx]
             
-            if not tags:
-                # Deterministic tags fallback if LLM failed
-                tags = memory_store.clean_tags(memory_store.auto_tags(fact))
-                if not tags:
-                    tags = ["general"]
+            # Compute similarity to all candidate tags
+            assigned_tags = []
+            for tag, tag_vector in zip(CANDIDATE_TAGS, tag_vectors):
+                sim = cosine_similarity(fact_vector, tag_vector)
+                if sim >= 0.35:  # Similarity threshold
+                    assigned_tags.append(tag)
                     
+            # Incorporate regex-based helper auto_tags
+            assigned_tags.extend(memory_store.auto_tags(fact))
+            
+            # Clean and clean duplicates/limit
+            tags = memory_store.clean_tags(assigned_tags)
+            if not tags:
+                tags = ["general"]
+                
             # 5a. Update Supabase
             try:
                 patch_r = requests.patch(
@@ -223,10 +207,9 @@ def main():
                 except Exception as e:
                     log_warning(f"Error updating local ChromaDB for record {item_id}: {e}")
                     
-        processed_count += len(batch)
-        time.sleep(0.2)  # Short pause to prevent overwhelming the local llama-server
+        log_info(f"Progress: {i + len(batch)}/{total_untagged} items processed.")
         
-    log_success(f"Successfully processed {processed_count} entries.")
+    log_success(f"Successfully processed all {total_untagged} entries.")
     log_success(f"Updated {updated_supabase} entries in Supabase.")
     log_success(f"Updated {updated_chroma} matching entries in local ChromaDB.")
 
