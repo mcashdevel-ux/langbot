@@ -128,3 +128,6 @@ TRIGGERS = {
         r"convert|parse|transform|filter|sort|format|math|statistics|round)\b"
     ),
 }
+
+# Tool names from this plugin that should always be bound (added to tools.core).
+CORE = []

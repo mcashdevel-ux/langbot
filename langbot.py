@@ -377,10 +377,10 @@ tools = [
 
 # Dynamically loaded plugin tools (tools/plugins/*.py).
 # Each plugin exports TOOLS, DESCRIPTIONS, and TRIGGERS.
-_plugin_tools, _plugin_descs, _plugin_triggers = discover_plugins()
+_plugin_tools, _plugin_descs, _plugin_triggers, _plugin_core = discover_plugins()
 if _plugin_tools:
     tools.extend(_plugin_tools)
-    _register_plugin_tools(_plugin_descs, _plugin_triggers)
+    _register_plugin_tools(_plugin_descs, _plugin_triggers, _plugin_core)
 
 _TOOL_NAMES = {t.name for t in tools}
 
@@ -614,7 +614,9 @@ def compact_context(state: AgentState):
     if not _ctx.needs_compaction(messages, summary):
         return {}
     dropped, _kept, new_summary = _ctx.compact(
-        messages, _summarize, summary, keep_last=_ctx.KEEP_LAST_MESSAGES)
+        messages, _summarize, summary,
+        keep_last=_ctx.KEEP_LAST_MESSAGES,
+        keep_last_tokens=_ctx.KEEP_LAST_TOKENS)
     removable = [m for m in dropped if getattr(m, "id", None)]
     if not removable:
         return {}
