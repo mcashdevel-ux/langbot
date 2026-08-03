@@ -230,8 +230,8 @@ class TestFallbackChain:
 class TestDefaultTiers:
     def test_ordered_by_quality_and_end_with_the_deepest_daily_quota(self):
         models = [t["model"] for t in DEFAULT_TIERS]
-        assert models[0] == "llama-3.3-70b-versatile"
-        assert models[-1] == "llama-3.1-8b-instant"
+        assert models[0] == "openai/gpt-oss-120b"
+        assert models[-1] == "openai/gpt-oss-20b"
 
     def test_every_tier_publishes_limits_and_a_key_source(self):
         for spec in DEFAULT_TIERS:
