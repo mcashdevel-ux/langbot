@@ -743,8 +743,16 @@ def tool_call_panel(name: str, args: dict = None):
           border_style="yellow")
 
 
-def tool_result_panel(name: str, content: str, is_error: bool = False):
-    """Render the (possibly truncated) result returned by a tool."""
+def tool_result_panel(name: str, content: str, is_error: bool = False,
+                         elapsed_ms: int = 0):
+    """Render the (possibly truncated) result returned by a tool.
+
+    Args:
+        name: Tool name.
+        content: The result text.
+        is_error: Style as an error panel.
+        elapsed_ms: Time the tool took, shown in the panel title.
+    """
     icon, _ = _tool_icon(name)
     text = content if isinstance(content, str) else str(content)
     full_len = len(text)
@@ -756,7 +764,9 @@ def tool_result_panel(name: str, content: str, is_error: bool = False):
     if _HAS_RICH and _escape_markup:
         text = _escape_markup(text)
     status = "✗" if is_error else "✓"
-    panel(title=f"{status} {icon} {name}", content=text,
+    timing = (f" ({elapsed_ms}ms)" if elapsed_ms < 2000
+              else f" ({elapsed_ms/1000:.1f}s)" if elapsed_ms else "")
+    panel(title=f"{status} {icon} {name}{timing}", content=text,
           border_style="red" if is_error else "blue")
 
 
@@ -775,6 +785,52 @@ def md_print(text: str):
             _RICH_CONSOLE.print(_RichMarkdown(text, code_theme="monokai"))
     else:
         _write(_apply_md_simple(text))
+
+
+# ═══════════════════════════════════════════════════════════════
+# Multi-engine search progress — live status as engines respond
+# ═══════════════════════════════════════════════════════════════
+
+def search_progress(total: int, done: int, name: str = "",
+                    ok: bool = True, result_count: int = 0):
+    """Print a one-line progress indicator while engines are being queried."""
+    if name:
+        status = f"{Fore.GREEN}\u2713{Style.RESET_ALL}" if ok else f"{Fore.RED}\u2717{Style.RESET_ALL}"
+        detail = f" ({result_count} results)" if ok and result_count else ""
+        eng = f"{status} {name}{detail}"
+    else:
+        eng = ""
+    bar = f"  {Fore.CYAN}\U0001f50d Searching{Style.RESET_ALL} [{done}/{total}]"
+    if eng:
+        bar += f"  {eng}"
+    _write(bar)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Context usage bar — compact prompt-line indicator
+# ═══════════════════════════════════════════════════════════════
+
+def context_usage_bar(width: int = 10) -> str:
+    """Return a compact ``[████░░ 62%]`` bar for the current context budget.
+
+    Reads ``usage_fraction()`` from ``context_budget``.  Returns an empty string
+    after the first step (before which no measurement exists).
+    """
+    from . import context_budget as _cb
+    frac = _cb.usage_fraction()
+    if frac <= 0.0:
+        return ""
+    filled = max(1, int(frac * width))
+    empty = width - filled
+    pct = int(frac * 100)
+    if pct >= 90:
+        color = Fore.RED
+    elif pct >= 65:
+        color = Fore.YELLOW
+    else:
+        color = Fore.GREEN
+    bar = f"{color}{_BLOCK_FULL * filled}{Style.RESET_ALL}{_BLOCK_LIGHT * empty}"
+    return f"[{bar} {color}{pct}%{Style.RESET_ALL}]"
 
 
 # ── Backward compat alias ──

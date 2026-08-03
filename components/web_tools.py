@@ -16,6 +16,7 @@ import requests
 
 from .config import config
 from .engines import search_engine, search_multi, _categorize_query, _AUTO_ENGINE_SETS
+from .console import search_progress
 from .scratch import save_to_scratch, read_scratch  # noqa: F401 (re-exported)
 
 # per-result snippet shown inline to the model
@@ -42,7 +43,8 @@ def search_web(query: str, engine: str = "duckduckgo", max_results: int = 5) -> 
     if engine == "auto":
         category = _categorize_query(query)
         engines = _AUTO_ENGINE_SETS.get(category, ["duckduckgo"])
-        results = search_multi(query, engines=engines, max_results=max_results)
+        results = search_multi(query, engines=engines, max_results=max_results,
+                              progress_callback=search_progress)
         used_engine = f"auto ({category}, {', '.join(engines)})"
     else:
         engines_to_try = [engine] + [e for e in ["duckduckgo", "searxng", "bing", "google"] if e != engine]
