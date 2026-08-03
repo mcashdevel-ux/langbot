@@ -23,7 +23,7 @@ SEARCH_SNIPPET_CHARS = config.get("web.search_snippet_chars", 160)
 # hard cap, regardless of what the model asks for
 SEARCH_MAX_RESULTS = config.get("web.search_max_results", 5)
 # how much of a fetched page goes inline; the whole page always reaches scratch
-FETCH_INLINE_CHARS = config.get("web.fetch_inline_chars", 1800)
+FETCH_INLINE_CHARS = config.get("web.fetch_inline_chars", 900)
 JINA_TIMEOUT = config.get("web.jina_timeout", 25)
 # anonymous Jina reader is rate-limited; one retry
 JINA_RETRY_ON_429 = config.get("web.jina_retry_on_429", 1)

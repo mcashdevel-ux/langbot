@@ -119,9 +119,12 @@ Precedence for a single setting: **environment variable > config file > default.
 | `logging` | `level`, `console`, `max_bytes`, `backup_count` | log destination and verbosity (see below) |
 | `memory` | `collection_name`, `embedding_model`, `embedding_device`, `worker_queue_size`, `worker_batch_size`, `worker_shutdown_timeout`, `max_facts_per_turn` | background distiller + vector store |
 | `memory` (search) | `min_similarity`, `recall_overfetch`, `mmr_lambda`, `dedup_similarity`, `dedup_token_overlap`, `lexical_search`, `max_tags`, `auto_tags` | retrieval precision and tags (see below) |
+| `memory` (distiller) | `non_distillable_tools` | tools whose output is machine state, so the turn skips its distillation call |
+| `context` | `budget_tokens`, `reserve_tokens`, `compact_at`, `keep_last_messages`, `summary_max_chars`, `chars_per_token` | history compaction (see below) |
 | `tools` | `read_inline_chars`, `grep_inline_lines`, `manyfiles_inline_chars`, `max_output_chars` | how much tool output goes inline; the full result always reaches scratch |
+| `tools` (binding) | `dynamic_binding`, `core` | which tool schemas are sent each step (see below) |
 | `web` | `search_snippet_chars`, `search_max_results`, `fetch_inline_chars`, `jina_timeout`, `jina_retry_on_429`, `searxng_settings_path`, `searxng_source_dir` | search/fetch behaviour |
-| `routing` | `max_nudges_per_turn`, `recursion_limit` | autonomy nudge budget per turn; graph steps per turn (two per tool round) |
+| `routing` | `max_nudges_per_turn`, `recursion_limit` | nudges (not tool rounds) allowed per turn; graph steps per turn (two per tool round) |
 | `compat` | `repair_json_tool_calls`, `repair_max_candidates` | recover tool calls from models that print them as text (see below) |
 
 See [`langbot.config.example.json`](./langbot.config.example.json) for every key with its
@@ -156,6 +159,29 @@ tail -f memory/langbot.log                 # watch diagnostics next to the REPL
 LANGBOT_LOG_LEVEL=DEBUG python langbot.py  # more detail (per-chunk graph tracing)
 LANGBOT_LOG_CONSOLE=1 python langbot.py    # mirror records to stderr as well
 ```
+
+### Context budget
+
+The checkpointer replays the whole thread on every step, so history is capped by
+tokens rather than left to grow until the server truncates it (which silently drops
+the system prompt) or rejects the turn. Before each agent step, if the thread plus its
+summary exceeds `compact_at` (0.7) of `budget_tokens - reserve_tokens`, everything
+older than the last `keep_last_messages` messages is folded into a rolling summary in
+one cheap LLM call, and those messages are deleted from the checkpoint as well as from
+the prompt. The split never separates a tool result from the message that requested it,
+and the details survive regardless: tool output is already on disk under a `scratch:` id.
+Counting uses `tiktoken` when installed and a `chars_per_token` estimate otherwise.
+
+Set `budget_tokens` to the context length the server is actually serving (`llama-server
+-c`), not the model's theoretical maximum.
+
+### Tool binding
+
+Every bound tool costs its JSON schema in the prompt on every step, and a small model
+picks worse from a longer menu. So only `tools.core` is always bound; the rest are added
+for a turn when the conversation mentions what they do, or once they have been used in
+that turn (see `components/tool_router.py`). Set `tools.dynamic_binding` to `false` to
+bind all twenty every step.
 
 ### Memory search
 

@@ -25,7 +25,7 @@ from components.logging_setup import log_path as _log_path, setup as _setup_logg
 _setup_logging()
 
 from langchain_core.tools import tool
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, RemoveMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, START, END, MessagesState
 from langgraph.prebuilt import ToolNode, tools_condition
@@ -72,6 +72,8 @@ from components import (
     scratch as _scratch,
     web_tools as _web_tools,
 )
+from components import context_budget as _ctx
+from components.tool_router import select_tools as _select_tools
 from components.routing import RECURSION_LIMIT, nudge_agent, route_agent
 from components.tool_call_repair import repair_message
 
@@ -331,8 +333,21 @@ tools = [
     search_web, fetch_url, read_scratch,
     remember, recall, vault,
 ]
-llm_with_tools = llm.bind_tools(tools)
 _TOOL_NAMES = {t.name for t in tools}
+
+# Binding all twenty schemas on every step is the single largest fixed cost in
+# the prompt, so the set is chosen per step (see components/tool_router.py).
+# Bound models are cached by tool set: bind_tools is cheap but not free, and the
+# same handful of sets recurs all session.
+_bound_llms: "dict[tuple[str, ...], object]" = {}
+
+
+def _llm_for(messages):
+    selected = _select_tools(tools, messages)
+    key = tuple(t.name for t in selected)
+    if key not in _bound_llms:
+        _bound_llms[key] = llm.bind_tools(selected)
+    return _bound_llms[key]
 
 # Argument names weak models reach for instead of the real ones. Renaming them is
 # strictly better than letting the call fail on an unexpected keyword; only
@@ -347,24 +362,41 @@ _ARG_ALIASES = {
 # ------------------------------------------------------------------------------
 # 4. System Prompt (autonomy + memory)
 # ------------------------------------------------------------------------------
+# Kept short on purpose: every word here is re-sent on every step, and a small
+# model follows a handful of sharp rules plus one worked example better than a
+# page of policy prose.
 system_prompt = SystemMessage(content=(
-    "You are a fully autonomous AI assistant with unrestricted shell, file, and web access, "
-    "as well as a persistent, searchable long-term memory. You act proactively and execute multi-step tasks to completion.\n\n"
-    "CRITICAL AUTONOMY RULES:\n"
-    "1. REASONING & CHAIN-OF-THOUGHT (CoT): Always enclose your step-by-step thinking inside <thought>...</thought> tags before you act. Formulate a plan and then execute it using tools immediately.\n"
-    "2. NEVER ASK FOR PERMISSION: Do NOT output phrases like 'Would you like me to proceed?', 'Should I fetch...', or 'Shall I run...'. If the user asks for a task (e.g. 'validate all secrets'), DO NOT describe how you would do it in text — ACTUALLY INVOKE THE TOOLS to execute it right now.\n"
-    "3. USE NATIVE TOOL CALLING ONLY: You have native tools available (e.g., `search_web`, `fetch_url`, `execute_shell_command`). DO NOT write python scripts to import these tools. DO NOT write dummy `curl` commands in text blocks. You must invoke the provided tools directly via your function calling interface.\n"
-    "4. AUTOMATIC MULTI-STEP RETRY: If a tool call fails or returns empty/partial results, try alternative parameters, tools, or shell commands immediately in the same turn. Do not stop and hand control back to the user until the full objective is achieved.\n\n"
-    "For editing files, prefer 'patch_file' over rewriting whole files. For background tasks, use 'task_start'.\n"
-    "MEMORY: call 'recall' with a plain-language query BEFORE answering anything that depends on what you already know about the user or this machine — their preferences, where projects and files live, which credentials exist, decisions taken earlier. An empty result means nothing relevant is stored, so just proceed. Call 'remember' only for durable facts (not greetings or small talk)."
+    "You are an autonomous assistant with shell, file, web and long-term memory tools "
+    "on this machine. You finish tasks yourself.\n"
+    "- Never ask for permission and never describe what you would do: call the tool.\n"
+    "- Use the tool-calling interface, not code blocks or curl commands that imitate it.\n"
+    "- If a call fails or returns little, try other arguments or another tool in the "
+    "same turn.\n"
+    "- Think inside <thought>...</thought>, then act.\n"
+    "- Prefer patch_file over rewriting a file; use task_start for anything long-running.\n"
+    "- Call recall before answering anything that depends on what you already know "
+    "(preferences, paths, past decisions); remember only durable facts.\n"
+    "- Long results are saved to a scratch file: read the rest with "
+    "read_scratch(scratch_id, offset).\n"
+    "Example — 'is the api key set?' is answered by calling vault with "
+    '{"action": "list"}, not by saying you will check.'
 ))
 
 # ------------------------------------------------------------------------------
 # 5. Agent Node
 # ------------------------------------------------------------------------------
-def agent(state: MessagesState):
-    messages = [system_prompt] + state["messages"]
-    response = llm_with_tools.invoke(messages)
+class AgentState(MessagesState):
+    """Messages plus the rolling summary of everything compaction dropped."""
+    summary: str
+
+
+def agent(state: AgentState):
+    messages = [system_prompt]
+    summary = state.get("summary") or ""
+    if summary:
+        messages.append(SystemMessage(content=f"Earlier in this session:\n{summary}"))
+    messages += state["messages"]
+    response = _llm_for(state["messages"]).invoke(messages)
     # Small local models often print the call they meant to make instead of
     # using the tool-calling channel; recover those so they actually execute.
     repair_message(response, _TOOL_NAMES, _ARG_ALIASES)
@@ -375,8 +407,16 @@ def agent(state: MessagesState):
 # ------------------------------------------------------------------------------
 _MEMORY_TOOL_NAMES = {"remember", "recall"}
 
+# Tools whose output is machine state, not knowledge: a task list or a vault
+# status describes this minute, so distilling it spends a whole extra LLM call
+# (doubling turn latency on a local model) to produce nothing worth keeping.
+NON_DISTILLABLE_TOOLS = set(app_config.get("memory.non_distillable_tools", [
+    "task_list", "task_status", "task_output", "task_kill", "task_start",
+    "vault", "read_scratch", "glob_list",
+]))
 
-def distill_knowledge(state: MessagesState) -> MessagesState:
+
+def distill_knowledge(state: AgentState) -> AgentState:
     """
     Hand the turn's user request, tool results, and answer to the background
     memory worker, which extracts durable facts and stores them off the graph's
@@ -388,7 +428,8 @@ def distill_knowledge(state: MessagesState) -> MessagesState:
     the assistant's intentions as facts would poison the memory with
     hallucinations. The memory tools themselves don't count as evidence: a turn
     whose only tool call was ``remember``/``recall`` has no new grounding, and
-    treating it as such is how greetings ended up in long-term memory.
+    treating it as such is how greetings ended up in long-term memory. Tools in
+    ``NON_DISTILLABLE_TOOLS`` are excluded for the same reason.
     """
     user_msgs = [m for m in state["messages"] if isinstance(m, HumanMessage)]
     ai_msgs = [m for m in state["messages"] if m.type == "ai" and m.content]
@@ -405,9 +446,11 @@ def distill_knowledge(state: MessagesState) -> MessagesState:
         m for m in turn_msgs
         if getattr(m, "type", None) == "tool"
         and getattr(m, "name", None) not in _MEMORY_TOOL_NAMES
+        and getattr(m, "name", None) not in NON_DISTILLABLE_TOOLS
     ]
     if not tool_results:
-        logger.debug("Knowledge distillation skipped: no tool results in this turn.")
+        logger.debug("Knowledge distillation skipped: no distillable tool results "
+                     "in this turn.")
         return state
 
     # Build context from actual tool outputs so the distillation model has
@@ -429,9 +472,38 @@ def distill_knowledge(state: MessagesState) -> MessagesState:
 # ------------------------------------------------------------------------------
 # 7. Build Graph with Distillation & Autonomous Guardrail
 # ------------------------------------------------------------------------------
+def _summarize(prompt: str) -> str:
+    """One cheap completion, with no tools bound, used to compact history."""
+    return llm.invoke([HumanMessage(content=prompt)]).content or ""
+
+
+def compact_context(state: AgentState):
+    """Fold the oldest messages into the rolling summary when over budget.
+
+    Runs before every agent step, so a single huge tool result is caught on the
+    step that follows it rather than on the next user turn. Messages are dropped
+    from the checkpointed state with ``RemoveMessage``, which is what keeps the
+    thread from growing forever on disk as well as in the prompt.
+    """
+    messages = state["messages"]
+    summary = state.get("summary") or ""
+    if not _ctx.needs_compaction(messages, summary):
+        return {}
+    dropped, _kept, new_summary = _ctx.compact(
+        messages, _summarize, summary, keep_last=_ctx.KEEP_LAST_MESSAGES)
+    removable = [m for m in dropped if getattr(m, "id", None)]
+    if not removable:
+        return {}
+    logger.info("context: compacted %d messages into the summary", len(removable))
+    return {
+        "messages": [RemoveMessage(id=m.id) for m in removable],
+        "summary": new_summary,
+    }
+
+
 _tool_node = ToolNode(tools)
 
-def tools_node(state: MessagesState):
+def tools_node(state: AgentState):
     """Run tools, then scrub any stored credential values from their output
     before it re-enters the model's context (see vault.redact)."""
     result = _tool_node.invoke(state)
@@ -442,15 +514,17 @@ def tools_node(state: MessagesState):
             msg.content = _vault_redact(msg.content)
     return result
 
-builder = StateGraph(MessagesState)
+builder = StateGraph(AgentState)
+builder.add_node("compact", compact_context)
 builder.add_node("agent", agent)
 builder.add_node("tools", tools_node)
 builder.add_node("nudge", nudge_agent)
 builder.add_node("distill", distill_knowledge)
 
-builder.add_edge(START, "agent")
+builder.add_edge(START, "compact")
+builder.add_edge("compact", "agent")
 builder.add_conditional_edges("agent", route_agent, ["tools", "nudge", "distill"])
-builder.add_edge("tools", "agent")
+builder.add_edge("tools", "compact")
 builder.add_edge("nudge", "agent")
 builder.add_edge("distill", END)
 

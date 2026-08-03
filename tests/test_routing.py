@@ -36,11 +36,23 @@ class TestRouteAgent:
 
     def test_nudge_budget_exhausted_falls_through_to_distill(self):
         msgs = [HumanMessage(content="go")]
-        msgs += [AIMessage(content="thinking", tool_calls=[
-            {"name": "recall", "args": {"query": "q"}, "id": str(i)},
-        ]) for i in range(5)]
+        msgs += [SystemMessage(content=routing.NUDGE_PERMISSION)
+                 for _ in range(routing.MAX_NUDGES_PER_TURN)]
         msgs.append(AIMessage(content="Would you like me to proceed?"))
         assert routing.route_agent(_state(*msgs)) == "distill"
+
+    def test_tool_rounds_do_not_spend_the_nudge_budget(self):
+        # The budget exists to stop a nudge loop; ordinary tool work must not
+        # consume it, or the guardrails switch off on exactly the long tasks
+        # they are there for.
+        msgs = [HumanMessage(content="go")]
+        for i in range(routing.MAX_NUDGES_PER_TURN + 3):
+            msgs.append(AIMessage(content="working", tool_calls=[
+                {"name": "recall", "args": {"query": "q"}, "id": str(i)},
+            ]))
+            msgs.append(ToolMessage(content="r", tool_call_id=str(i), name="recall"))
+        msgs.append(AIMessage(content="Would you like me to proceed?"))
+        assert routing.route_agent(_state(*msgs)) == "nudge"
 
     def test_duplicate_final_answer_goes_to_distill(self):
         state = _state(
