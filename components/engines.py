@@ -427,6 +427,7 @@ from urllib.parse import urlparse, urlunparse
 # only when the query contains a matching keyword.
 _DEFAULT_MULTI_ENGINES = [
     "duckduckgo", "wikipedia", "arxiv", "github",
+    "stackexchange", "pubmed",
 ]
 
 # Domains whose results get a small authority bonus.
@@ -569,9 +570,9 @@ def _categorize_query(query: str) -> str:
 
 
 _AUTO_ENGINE_SETS = {
-    "general": ["duckduckgo", "wikipedia"],
-    "academic": ["arxiv", "wikipedia", "duckduckgo"],
-    "code": ["github", "duckduckgo"],
+    "general": ["duckduckgo", "wikipedia", "stackexchange"],
+    "academic": ["arxiv", "pubmed", "wikipedia", "duckduckgo"],
+    "code": ["github", "stackexchange", "duckduckgo"],
     "wiki": ["wikipedia", "duckduckgo"],
 }
 
@@ -586,6 +587,7 @@ def search_multi(
     lang: str = "en",
     max_results: int = 10,
     max_workers: int = 4,
+    progress_callback: "t.Callable[[int, int, str, bool, int], None] | None" = None,
 ) -> "list[dict]":
     """Run a query across multiple engines, deduplicate, and rank the merged result.
 
@@ -593,6 +595,9 @@ def search_multi(
         query: Search query string.
         engines: Engine names; if ``None``, uses ``_DEFAULT_MULTI_ENGINES``.
         max_workers: Maximum concurrent engine calls (default 4).
+        progress_callback: Optional ``(total, done, name, ok, result_count)`` called
+            as each engine completes.  Use ``components.console.search_progress`` for
+            a live terminal status line.
 
     Returns:
         Deduplicated list of result dicts, up to ``max_results`` entries.
@@ -615,15 +620,23 @@ def search_multi(
             ): name
             for name in engine_list
         }
+        done = 0
+        total = len(engine_list)
         for future in concurrent.futures.as_completed(futures):
             name = futures[future]
+            done += 1
             try:
                 engine_results = future.result()
             except Exception:
                 logger.warning("search_multi: engine %s failed, skipping", name,
                                exc_info=True)
+                if progress_callback:
+                    progress_callback(total, done, name, ok=False, result_count=0)
                 continue
             all_results.extend(engine_results)
+            if progress_callback:
+                progress_callback(total, done, name, ok=True,
+                                  result_count=len(engine_results))
 
     # Dedup and apply authority scoring.
     deduped = _dedup_results(all_results)
