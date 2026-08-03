@@ -203,14 +203,14 @@ Set `budget_tokens` to the context length the server is actually serving (`llama
 guess:
 
 ```
-context   14 steps, peak prompt 9310 tokens (history 8004, overhead 1306 of reserve 8192,
+context   14 steps, peak prompt 9310 tokens (history 8004, overhead 1306 of reserve 2000,
           schemas 956), cache reuse 41%, 2 compactions dropping 5100 tokens
 ```
 
 - **overhead** is the system prompt + rolling summary + bound tool schemas — everything
   `reserve_tokens` is meant to cover apart from the answer being generated. On this repo's
   tool set that is ~1.2K (schemas ~950 for the 6–8 tools a turn binds, ~2.2K if all 20 were
-  bound), so a 8192 reserve is mostly headroom for generation.
+  bound), so a 2000 reserve is tight — the breathing room is in conversation, not overhead.
 - **cache reuse** is the share of prompt tokens a prefix-caching server could keep from the
   previous step. Compaction rewrites the leading system message (the summary lives inside
   it, because a second system message is rejected), so the step after a compaction reuses
@@ -473,6 +473,8 @@ components/
   input.py              # readline input UX used by the REPL
   console.py            # terminal UI helpers used by the REPL
   utils.py              # shared helpers (atomic JSON writes, truncation)
+  warmup.py             # background initialiser (embeddings, housekeeping) to keep startup fast
+  supabase_sync.py      # optional cloud sync for long-term memory (two-way Chroma ↔ Supabase)
 langbot.config.example.json  # template listing every setting and its default
 CODE_REVIEW.md          # review of the initial commit with known issues + fixes
 MEMORY_POLICY.md        # where persistent state may live (./memory/ only)

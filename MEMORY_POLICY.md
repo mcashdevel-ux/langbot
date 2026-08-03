@@ -14,6 +14,7 @@ The project root must remain clean — it contains only source code, configurati
 | Vault master key | `./memory/vault/.masterkey` | components/vault.py (0600 perms) |
 | Tool-result scratchpad | `./memory/agent_scratch/` | components/scratch.py |
 | Knowledge distillation log | `./memory/knowledge.md` | (user-created docs) |
+| Fact confidence scores | `agent_longterm_memory` collection metadata | `components/memory_store.py` (Chroma `confidence` column, 0.0–1.0) |
 
 ## Enforcement
 
