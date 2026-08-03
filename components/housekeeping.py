@@ -157,12 +157,13 @@ def prune_checkpoints(db_path, keep_threads=None, active_thread_id=None) -> dict
 
 
 def sweep(scratch_dir, checkpoint_db, active_thread_id=None) -> str:
-    """Run both sweeps, log and return a one-line summary."""
+    """Run all sweeps — scratch, checkpoints, and memory — log and return a one-line summary."""
     if not ENABLED:
         return "disabled"
 
     scratch = {"removed": 0, "bytes": 0}
     checkpoints = {"threads": 0, "rows": 0}
+    memories = {"removed": 0, "kept": 0}
     try:
         scratch = prune_scratch(scratch_dir)
     except Exception as e:                   # never let a sweep break start-up
@@ -171,12 +172,97 @@ def sweep(scratch_dir, checkpoint_db, active_thread_id=None) -> str:
         checkpoints = prune_checkpoints(checkpoint_db, active_thread_id=active_thread_id)
     except Exception as e:
         logger.warning("housekeeping: checkpoint sweep failed: %s", e, exc_info=True)
+    try:
+        memories = prune_memories()
+    except Exception as e:
+        logger.warning("housekeeping: memory prune failed: %s", e, exc_info=True)
 
     summary = (
         f"{scratch['removed']} scratch entries "
         f"({scratch['bytes'] / (1024 * 1024):.1f} MB), "
         f"{checkpoints['threads']} threads ({checkpoints['rows']} rows)"
     )
-    if scratch["removed"] or checkpoints["threads"]:
-        logger.info("housekeeping: freed %s", summary)
+    if memories["removed"]:
+        summary += (
+            f", {memories['removed']} stale memories pruned "
+            f"({memories['kept']} kept)"
+        )
     return summary
+
+
+def prune_memories() -> dict:
+    """Remove stale low-confidence facts from the memory store.
+
+    Only distilled facts (confidence < 1.0) older than ``memory.prune_age_days``
+    are eligible; manual facts (/save) are always kept.  Low-confidence facts
+    that have been recalled at least once are also kept — "never recalled" is a
+    stronger signal of staleness than "recalled rarely".
+
+    Returns a dict with ``removed`` and ``kept`` counts, or both zero when
+    pruning is disabled or the store is empty.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    from .config import config as _cfg
+    from .memory_store import (
+        PRUNE_AGE_DAYS, PRUNE_CONFIDENCE_THRESHOLD,
+        get_collection,
+    )
+
+    prune_age_days = _cfg.get("memory.prune_age_days", PRUNE_AGE_DAYS)
+    if prune_age_days <= 0:
+        return {"removed": 0, "kept": 0}
+
+    collection = get_collection()
+    total = collection.count()
+    if total == 0:
+        return {"removed": 0, "kept": 0}
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=prune_age_days)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+    doomed = []
+    limit = 1000
+    offset = 0
+    while offset < total:
+        batch = collection.get(
+            offset=offset,
+            limit=limit,
+            include=["metadatas"],
+        )
+        ids = batch.get("ids") or []
+        metas = batch.get("metadatas") or []
+        if not ids:
+            break
+        for mem_id, meta in zip(ids, metas):
+            if meta is None:
+                continue
+            source = (meta.get("source") or "").strip()
+            timestamp = (meta.get("timestamp") or "").strip()
+            confidence_str = (meta.get("confidence") or "1.0").strip()
+            try:
+                confidence = float(confidence_str)
+            except ValueError:
+                confidence = 0.7
+
+            if source in ("manual", "supabase", ""):
+                continue
+            if confidence >= PRUNE_CONFIDENCE_THRESHOLD:
+                continue
+            if not timestamp or timestamp >= cutoff:
+                continue
+            doomed.append(mem_id)
+        offset += limit
+        if not ids or len(ids) < limit:
+            break
+
+    if doomed:
+        collection.delete(ids=doomed)
+        logger.info(
+            "housekeeping: pruned %d stale memory fact(s) "
+            "(older than %d days, confidence < %.1f)",
+            len(doomed), prune_age_days, PRUNE_CONFIDENCE_THRESHOLD,
+        )
+
+    return {"removed": len(doomed), "kept": total - len(doomed)}

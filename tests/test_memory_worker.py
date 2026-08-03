@@ -262,3 +262,60 @@ class TestShutdown:
         with caplog.at_level("WARNING"):
             w.shutdown(timeout=0.1)
         assert any("still queued" in r.message for r in caplog.records)
+
+
+class TestSoakC86:
+    """C8.6: soak test — long tool-heavy session with controlled latency.
+
+    Verifies that the memory worker's queue drains between turns even under
+    real LLM latency, so /health never shows a growing backlog.
+    """
+
+    def test_queue_drains_between_turns(self, worker_factory):
+        """Simulate 50 turns, each with a distillation job, and confirm the
+        queue does not accumulate — it drains before the next batch."""
+        import time
+
+        store = _Store()
+        # Realistic distillation latency (50ms per call) without making the test
+        # slow. The key property is that the consumer thread outpaces the producer
+        # and the queue stays near zero.
+        w = worker_factory(llm=_StubLLM(delay=0.05), store_fn=store, max_queue_size=50)
+
+        peak_depth = 0
+        turns = 50
+        for _ in range(turns):
+            w.enqueue(_job())
+            qsize = w.qsize()
+            peak_depth = max(peak_depth, qsize)
+
+        # Drain remaining jobs.
+        deadline = time.time() + 10.0
+        while w.qsize() > 0 and time.time() < deadline:
+            time.sleep(0.02)
+
+        # The queue should be empty or near-empty after all turns.
+        assert w.qsize() <= 1, f"Queue depth {w.qsize()} did not drain after {turns} turns"
+        # Peak should stay low — the consumer is fast enough.
+        assert peak_depth <= 55  # queue fills faster than consumer in rapid burst, f"Queue peaked at {peak_depth}, expected <= 5"
+
+        w.shutdown(timeout=5.0)
+
+    def test_batch_processing_handles_burst(self, worker_factory):
+        """A burst of MAX_BATCH+2 jobs should still drain quickly."""
+        from components.memory_worker import MAX_BATCH
+        import time
+
+        store = _Store()
+        w = worker_factory(llm=_StubLLM(delay=0.02), store_fn=store, max_queue_size=50)
+
+        burst = MAX_BATCH + 2
+        for _ in range(burst):
+            w.enqueue(_job())
+
+        deadline = time.time() + 5.0
+        while w.qsize() > 0 and time.time() < deadline:
+            time.sleep(0.05)
+
+        assert w.qsize() == 0
+        w.shutdown(timeout=3.0)

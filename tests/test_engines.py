@@ -317,3 +317,72 @@ class TestEngineLoader:
         names = [e["name"] for e in listed]
         assert names == ["arxiv", "google"]  # sorted, 'hidden' filtered
         assert listed[0]["shortcut"] == "arx"
+
+
+class TestDedupAndAuthority:
+    """Track 10: URL dedup, near-duplicate detection, and authority scoring."""
+
+    def test_normalize_url_strips_tracking_params(self):
+        url = "https://example.com/page?utm_source=twitter&id=5"
+        norm = engines._normalize_url(url)
+        assert "utm_source" not in norm
+        assert "id=5" in norm
+
+    def test_normalize_url_lowercases_host_and_strips_fragment(self):
+        url = "https://Example.COM/Path/#section"
+        norm = engines._normalize_url(url)
+        assert norm == "//example.com/Path"
+
+    def test_url_dedup_keeps_result_with_more_content(self):
+        results = [
+            {"url": "https://a.com/x", "content": "short"},
+            {"url": "https://a.com/x", "content": "much longer content here"},
+        ]
+        deduped = engines._dedup_results(results)
+        assert len(deduped) == 1
+        assert deduped[0]["content"] == "much longer content here"
+
+    def test_near_duplicate_title_collapsed(self):
+        results = [
+            {"title": "Python programming language guide", "url": "https://a.com/1", "content": "x"},
+            {"title": "Python programming language tutorial", "url": "https://b.com/2", "content": "y" * 100},
+        ]
+        deduped = engines._dedup_results(results)
+        assert len(deduped) == 1
+        assert len(deduped[0]["content"]) > 10  # kept the longer one
+
+    def test_different_titles_kept_separate(self):
+        results = [
+            {"title": "Python programming", "url": "https://a.com/1", "content": "x"},
+            {"title": "Rust ownership model", "url": "https://b.com/2", "content": "y"},
+        ]
+        deduped = engines._dedup_results(results)
+        assert len(deduped) == 2
+
+    def test_authority_bonus_for_high_quality_domains(self):
+        assert engines._authority_score("https://arxiv.org/abs/1234") > 0
+        assert engines._authority_score("https://github.com/x/y") > 0
+        assert engines._authority_score("https://docs.python.org/3/") > 0
+
+    def test_authority_penalty_for_low_quality_domains(self):
+        assert engines._authority_score("https://pinterest.com/pin/123") < 0
+        assert engines._authority_score("https://quora.com/question") < 0
+
+    def test_authority_neutral_for_unknown(self):
+        assert engines._authority_score("https://someblog.example.com/post") == 0.0
+
+    def test_categorize_query_academic(self):
+        assert engines._categorize_query("latest arxiv paper on transformers") == "academic"
+        assert engines._categorize_query("doi 10.1234 research on ml") == "academic"
+
+    def test_categorize_query_code(self):
+        assert engines._categorize_query("python asyncio library") == "code"
+        assert engines._categorize_query("rust cargo package") == "code"
+
+    def test_categorize_query_general(self):
+        assert engines._categorize_query("weather today") == "general"
+        assert engines._categorize_query("best restaurants") == "general"
+
+    def test_title_overlap_empty_returns_zero(self):
+        assert engines._title_overlap("", "something") == 0.0
+        assert engines._title_overlap("something", "") == 0.0
