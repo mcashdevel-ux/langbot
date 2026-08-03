@@ -46,6 +46,40 @@
     ]
   },
 
+  "_distill_comment": "Memory distillation is tried on these hosted models in order, then on the local llm above. A tier is skipped when its api_key_env is unset or its published rate limits (rpm/rpd/tpm/tpd, 0 = no limit) leave no room; set \"tiers\": [] to distill locally only.",
+  "distill": {
+    "cooldown_seconds": 300,
+    "temperature": 0.0,
+    "timeout": 30,
+    "reserve_output_tokens": 512,
+    "tiers": [
+      {
+        "model": "llama-3.3-70b-versatile",
+        "base_url": "https://api.groq.com/openai/v1",
+        "api_key_env": "GROQ_API_KEY",
+        "rpm": 30, "rpd": 1000, "tpm": 12000, "tpd": 100000
+      },
+      {
+        "model": "openai/gpt-oss-120b",
+        "base_url": "https://api.groq.com/openai/v1",
+        "api_key_env": "GROQ_API_KEY",
+        "rpm": 30, "rpd": 1000, "tpm": 8000, "tpd": 200000
+      },
+      {
+        "model": "qwen/qwen3.6-27b",
+        "base_url": "https://api.groq.com/openai/v1",
+        "api_key_env": "GROQ_API_KEY",
+        "rpm": 30, "rpd": 1000, "tpm": 8000, "tpd": 200000
+      },
+      {
+        "model": "llama-3.1-8b-instant",
+        "base_url": "https://api.groq.com/openai/v1",
+        "api_key_env": "GROQ_API_KEY",
+        "rpm": 30, "rpd": 14400, "tpm": 6000, "tpd": 500000
+      }
+    ]
+  },
+
   "context": {
     "budget_tokens": 32768,
     "reserve_tokens": 8192,
