@@ -39,20 +39,38 @@
     "dedup_token_overlap": 0.6,
     "lexical_search": true,
     "max_tags": 5,
-    "auto_tags": true
+    "auto_tags": true,
+    "non_distillable_tools": [
+      "task_list", "task_status", "task_output", "task_kill", "task_start",
+      "vault", "read_scratch", "glob_list"
+    ]
+  },
+
+  "context": {
+    "budget_tokens": 32768,
+    "reserve_tokens": 8192,
+    "compact_at": 0.7,
+    "keep_last_messages": 12,
+    "summary_max_chars": 1500,
+    "chars_per_token": 4
   },
 
   "tools": {
-    "read_inline_chars": 1500,
-    "grep_inline_lines": 20,
-    "manyfiles_inline_chars": 4000,
-    "max_output_chars": 20000
+    "read_inline_chars": 800,
+    "grep_inline_lines": 12,
+    "manyfiles_inline_chars": 2000,
+    "max_output_chars": 8000,
+    "dynamic_binding": true,
+    "core": [
+      "execute_shell_command", "read_any_file", "write_any_file",
+      "patch_file", "search_web", "recall"
+    ]
   },
 
   "web": {
     "search_snippet_chars": 160,
     "search_max_results": 5,
-    "fetch_inline_chars": 1800,
+    "fetch_inline_chars": 900,
     "jina_timeout": 25,
     "jina_retry_on_429": 1,
     "searxng_settings_path": "/etc/searxng/settings.yml",
@@ -60,7 +78,7 @@
   },
 
   "routing": {
-    "max_nudges_per_turn": 5,
+    "max_nudges_per_turn": 3,
     "recursion_limit": 100
   },
 

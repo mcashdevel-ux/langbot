@@ -54,7 +54,13 @@ TOOL_AVOIDANCE_PATTERNS = (
 )
 
 # Nudge re-tries allowed per human turn before the loop gives up and finalizes.
-MAX_NUDGES_PER_TURN = config.get("routing.max_nudges_per_turn", 5)
+# Each one costs a wasted generation plus a re-send of the whole thread, so on a
+# small local model a generous budget is spent on context, not on recovery: a
+# model that ignored two corrections will ignore the third.
+MAX_NUDGES_PER_TURN = config.get("routing.max_nudges_per_turn", 3)
+
+# Marker every nudge carries, so the budget counts nudges rather than AI turns.
+NUDGE_MARKER = "[AUTONOMOUS AGENT DIRECTIVE]"
 
 # Graph super-steps allowed per human turn. One tool round costs two steps
 # (agent -> tools -> agent), so 100 leaves room for ~48 tool rounds before
@@ -63,16 +69,12 @@ MAX_NUDGES_PER_TURN = config.get("routing.max_nudges_per_turn", 5)
 RECURSION_LIMIT = config.get("routing.recursion_limit", 100)
 
 NUDGE_PERMISSION = (
-    "[AUTONOMOUS AGENT DIRECTIVE]: You just asked for permission or confirmation instead of acting. "
-    "Do NOT ask the user whether to proceed. "
-    "Invoke the required tool calls RIGHT NOW to complete the user request."
+    f"{NUDGE_MARKER}: Do not ask whether to proceed. Make the tool calls now."
 )
 
 NUDGE_CODE_BLOCK = (
-    "[AUTONOMOUS AGENT DIRECTIVE]: You wrote code or curl commands in a text block instead of "
-    "calling your native tools. You have tools available — search_web, fetch_url, "
-    "execute_shell_command, vault, etc. DO NOT write Python or bash blocks that pretend to use "
-    "these tools. Call them DIRECTLY via the function-calling interface RIGHT NOW."
+    f"{NUDGE_MARKER}: That was a code block imitating a tool, not a tool call. "
+    "Call the tool through the function-calling interface now."
 )
 
 
@@ -83,6 +85,22 @@ def ai_turns_since_human(messages) -> int:
         if isinstance(m, HumanMessage):
             break
         if getattr(m, "type", None) == "ai":
+            count += 1
+    return count
+
+
+def nudges_since_human(messages) -> int:
+    """Count nudges already issued in the current turn.
+
+    Counting AI turns instead would spend the budget on ordinary tool rounds, so
+    a turn with several tool calls would silently lose its guardrails.
+    """
+    count = 0
+    for m in reversed(messages):
+        if isinstance(m, HumanMessage):
+            break
+        content = getattr(m, "content", "")
+        if isinstance(content, str) and content.startswith(NUDGE_MARKER):
             count += 1
     return count
 
@@ -135,7 +153,7 @@ def route_agent(state):
             any(phrase in content_lower for phrase in PERMISSION_PHRASES)
             or any(pat in content_lower for pat in TOOL_AVOIDANCE_PATTERNS)
         )
-        if needs_nudge and ai_turns_since_human(messages) < MAX_NUDGES_PER_TURN:
+        if needs_nudge and nudges_since_human(messages) < MAX_NUDGES_PER_TURN:
             return "nudge"
 
     return "distill"

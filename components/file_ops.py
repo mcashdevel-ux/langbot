@@ -22,7 +22,7 @@ from .utils import MAX_OUTPUT_CHARS
 
 # How much of a text file goes inline into the model's context; the rest stays
 # reachable via read_scratch (same pattern web_tools uses for fetched pages).
-READ_INLINE_CHARS = config.get("tools.read_inline_chars", 1500)
+READ_INLINE_CHARS = config.get("tools.read_inline_chars", 800)
 
 
 def _format_size(size_bytes: float) -> str:

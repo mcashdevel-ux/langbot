@@ -25,8 +25,8 @@ not done.
 
 | Step | Status | Note |
 |---|---|---|
-| A1 extract `scratch.py` | DONE (deviation) | cap is `SCRATCH_SAVE_CHARS`, now config-driven |
-| A2 point `web_tools.py` at it | DONE | 20,000-char cap preserved via `max_bytes=FETCH_SAVE_CHARS` |
+| A1 extract `scratch.py` | DONE (deviation) | the write cap was later removed entirely ([#25](https://github.com/mcashdevel-ux/langbot/pull/25)) |
+| A2 point `web_tools.py` at it | DONE (superseded) | the 20,000-char cap it preserved was removed by [#25](https://github.com/mcashdevel-ux/langbot/pull/25) |
 | A3 `find_in_files` via scratch, no `-m 5` | DONE | both `grep` and the pure-Python fallback |
 | A4 `read_many_files` via scratch | DONE | |
 | A5 `read_file` via scratch | DONE | |
@@ -56,9 +56,11 @@ read-during-write test passed, so C1's contingency (widening the lock to reads) 
 - Proprietary `LICENSE` + `CONTRIBUTING.md` + README/pyproject updates — [#14](https://github.com/mcashdevel-ux/langbot/pull/14).
 - Optional config file `components/config.py` (`langbot.config.json`, defaults preserved when
   absent) — [#15](https://github.com/mcashdevel-ux/langbot/pull/15). Several constants this
-  plan introduced as literals (`SCRATCH_SAVE_CHARS`, `READ_INLINE_CHARS`,
-  `GREP_INLINE_LINES`, `MANYFILES_INLINE_CHARS`, `MAX_QUEUE_SIZE`, `MAX_BATCH`, the shutdown
-  timeout) are now read from that file, falling back to the values written below.
+  plan introduced as literals (`READ_INLINE_CHARS`, `GREP_INLINE_LINES`,
+  `MANYFILES_INLINE_CHARS`, `MAX_QUEUE_SIZE`, `MAX_BATCH`, the shutdown timeout) are now read
+  from that file, falling back to the values written below. `SCRATCH_SAVE_CHARS` and
+  `FETCH_SAVE_CHARS` were config keys too until
+  [#25](https://github.com/mcashdevel-ux/langbot/pull/25) deleted both caps.
 
 ### Remaining open items
 
@@ -102,10 +104,11 @@ infrastructure and applies it to the two tools that skip it.
 ### Step A1 — Extract the scratch store into its own module
 
 > **Status: DONE (deviation).** `components/scratch.py` exists with all five symbols moved.
-> The `max_bytes` default is the named constant `SCRATCH_SAVE_CHARS` (200,000) rather than an
-> inline literal, and it now reads `tools.scratch_save_chars` from the optional config file
-> ([#15](https://github.com/mcashdevel-ux/langbot/pull/15)) with 200,000 as the fallback, so
-> the module depends on `os`, `uuid`, and `.config` (itself dependency-free).
+> The `max_bytes` default became the named constant `SCRATCH_SAVE_CHARS` (200,000), config-driven
+> via `tools.scratch_save_chars` ([#15](https://github.com/mcashdevel-ux/langbot/pull/15)) — and
+> was then dropped altogether ([#25](https://github.com/mcashdevel-ux/langbot/pull/25)): truncating
+> the copy that exists to preserve the full result defeats the point of the store, so writes are
+> now verbatim and only the inline preview is capped.
 
 **Goal / purpose.** `save_to_scratch` / `read_scratch` / `SCRATCH_DIR` currently
 live inside `web_tools.py`. `code_search.py` and `file_ops.py` need the same
@@ -258,9 +261,10 @@ results exist or how to page through them.
 ### Step A7 — Testing for Track A
 
 > **Status: DONE (deviation).** Steps 1–3 are automated in `tests/test_code_search.py`,
-> `tests/test_file_ops.py`, and `tests/test_scratch.py` (plus `tests/test_web_tools.py` for the
-> preserved 20,000-char web cap). **Step 4 is OPEN** — no local OpenAI-compatible LLM server was
-> available, so the dogfooding transcript was never replayed end to end.
+> `tests/test_file_ops.py`, and `tests/test_scratch.py` (plus `tests/test_web_tools.py`, which now
+> asserts the *absence* of a web save cap after [#25](https://github.com/mcashdevel-ux/langbot/pull/25)).
+> **Step 4 is OPEN** — no local OpenAI-compatible LLM server was available, so the dogfooding
+> transcript was never replayed end to end.
 
 **Goal / purpose.** Confirm the fix actually changes behavior for the exact case
 that exposed the bug, and confirm nothing regresses for small results.
