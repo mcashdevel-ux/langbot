@@ -162,13 +162,15 @@ dropped to 3 and the nudge texts are one line each.
   `/knowledge`, `/save`).
 - **L12 (general):** ✅ Fixed — `requirements.txt`, `requirements-dev.txt` and a
   `pyproject.toml` with `requires-python = ">=3.10"` now exist alongside a 465-test suite.
-- **L13 (components/scratch.py):** ⬜ Open — scratch entries are never pruned. Every large
-  tool result leaves a file under `paths.scratch_dir` for the lifetime of the machine, and
-  now that saves are uncapped (#25) a few large fetches can be hundreds of MB. Add an age-
-  or size-based sweep at startup.
-- **L14 (langbot.py):** ⬜ Open — abandoned checkpoint threads accumulate in the SQLite
-  checkpoint DB: `/new` and every restart mint a new `thread_id` and nothing ever deletes
-  the old rows.
+- **L13 (components/scratch.py):** ✅ Fixed — `components/housekeeping.py` sweeps
+  `paths.scratch_dir` once per start on the warmup thread: entries older than
+  `housekeeping.scratch_max_age_days` (7) go, then oldest-first until the directory fits
+  `scratch_max_total_mb` (512). Recent entries are kept regardless of size.
+- **L14 (langbot.py):** ✅ Fixed — the same sweep keeps the active thread plus the
+  `housekeeping.checkpoint_keep_threads` (20) most recently written threads and deletes the
+  rest from every table carrying a `thread_id`, then `VACUUM`s so the disk is actually
+  returned. Recency comes from `rowid` order, since the checkpointer's schema stores no
+  timestamp. `/health` reports what the last sweep freed.
 
 ---
 
@@ -179,6 +181,5 @@ dropped to 3 and the nudge texts are one line each.
   `/health`'s `tool-call repairs` counters (`tool_call_repair.stats()`) are how you tell
   whether it took effect — a session that stays at `0 recovered` is the evidence that
   this is done, and that the repair/nudge layers can start shrinking.
-2. Reclaim disk: prune scratch entries (L13) and abandoned checkpoint threads (L14).
-3. Consider password-by-default or a clearer at-rest warning for the vault (C3 remaining).
-4. Tidy the remaining engines/vault nits (L4, L5, L7–L9).
+2. Consider password-by-default or a clearer at-rest warning for the vault (C3 remaining).
+3. Tidy the remaining engines/vault nits (L4, L5, L7–L9).
