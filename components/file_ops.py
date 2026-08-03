@@ -17,8 +17,8 @@ import os
 import subprocess
 
 from .config import config
-from .scratch import save_to_scratch
-from .utils import truncate
+from .scratch import offload
+from .utils import MAX_OUTPUT_CHARS
 
 # How much of a text file goes inline into the model's context; the rest stays
 # reachable via read_scratch (same pattern web_tools uses for fetched pages).
@@ -66,10 +66,8 @@ def read_file(file_path: str) -> str:
         return "(empty file)"
     if len(content) <= READ_INLINE_CHARS:
         return content
-    sid = save_to_scratch(content, prefix="file")
-    return (f"{os.path.basename(path)} — {len(content)} chars, showing first "
-            f"{READ_INLINE_CHARS} (full file at scratch:{sid}):\n"
-            f"{content[:READ_INLINE_CHARS]}")
+    return f"{os.path.basename(path)} — " + offload(
+        content, prefix="file", inline_chars=READ_INLINE_CHARS, label="full file")
 
 
 def _coerce_content(content) -> str:
@@ -236,4 +234,5 @@ def git_diff(file_path: str = ".", cached: bool = False) -> str:
     output = result.stdout or result.stderr
     if not output.strip():
         return "No changes."
-    return truncate(output)
+    return offload(output, prefix="diff", inline_chars=MAX_OUTPUT_CHARS,
+                   label="full diff")

@@ -40,8 +40,8 @@ except ModuleNotFoundError:
                    "will not persist")
 
 from components.web_tools import search_web as _search_web, fetch_url as _fetch_url
-from components.scratch import read_scratch as _read_scratch
-from components.utils import truncate
+from components.scratch import offload as _offload, read_scratch as _read_scratch
+from components.utils import MAX_OUTPUT_CHARS, truncate
 # Aliased: `config` is the per-thread graph config in this module's REPL helpers.
 from components.config import CONFIG_ENV_VAR, CONFIG_FILENAME, config as app_config
 from components.memory_store import (
@@ -182,6 +182,9 @@ def execute_shell_command(command: str, cwd: str = "", timeout: int = 120) -> st
     Optionally run in ``cwd`` with a custom ``timeout`` (seconds; 0 = no limit).
     For servers, watchers, or anything long-running, use 'task_start' instead so
     the process is tracked and can be inspected or killed.
+
+    Long output is previewed inline, with the whole of it saved to scratch and
+    reachable via 'read_scratch'.
     """
     try:
         result = subprocess.run(
@@ -194,7 +197,10 @@ def execute_shell_command(command: str, cwd: str = "", timeout: int = 120) -> st
             output += f"\n[STDERR]:\n{result.stderr}"
         if result.returncode:
             output += f"\n[Exit code: {result.returncode}]"
-        return truncate(output) or f"Command '{command}' executed successfully."
+        if not output:
+            return f"Command '{command}' executed successfully."
+        return _offload(output, prefix="shell", inline_chars=MAX_OUTPUT_CHARS,
+                        label="full output")
     except subprocess.TimeoutExpired:
         return f"Timeout ({timeout}s): '{command}'"
     except Exception as e:

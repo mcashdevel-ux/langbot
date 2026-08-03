@@ -165,3 +165,19 @@ class TestGitDiff:
         out = file_ops.git_diff(str(p))
         assert "-line one" in out
         assert "+line two" in out
+
+    def test_large_diff_offloaded_in_full(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(file_ops, "MAX_OUTPUT_CHARS", 200)
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True)
+        p = tmp_path / "x.txt"
+        p.write_text("".join(f"old {i}\n" for i in range(400)))
+        subprocess.run(["git", "add", "x.txt"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp_path, check=True)
+        p.write_text("".join(f"new {i}\n" for i in range(400)))
+        out = file_ops.git_diff(str(p))
+        assert "scratch:diff_" in out
+        sid = out.split("scratch:")[1].split(")")[0]
+        full = scratch.read_scratch(sid, offset=0, length=1_000_000)
+        assert "+new 399" in full
