@@ -146,7 +146,7 @@ Precedence for a single setting: **environment variable > config file > default.
 | `memory` (search) | `min_similarity`, `recall_overfetch`, `mmr_lambda`, `dedup_similarity`, `dedup_token_overlap`, `lexical_search`, `max_tags`, `auto_tags` | retrieval precision and tags (see below) |
 | `memory` (distiller) | `non_distillable_tools` | tools whose output is machine state, so the turn skips its distillation call |
 | `distill` | `tiers`, `cooldown_seconds`, `temperature`, `timeout`, `reserve_output_tokens` | hosted models tried for distillation before the local one (see below) |
-| `context` | `budget_tokens`, `reserve_tokens`, `compact_at`, `keep_last_messages`, `summary_max_chars`, `chars_per_token` | history compaction (see below) |
+| `context` | `budget_tokens`, `reserve_tokens`, `compact_at`, `keep_last_messages`, `keep_last_tokens`, `tokenizer_scale`, `summary_max_chars`, `chars_per_token` | history compaction (see below) |
 | `tools` | `read_inline_chars`, `grep_inline_lines`, `manyfiles_inline_chars`, `max_output_chars` | how much tool output goes inline; the full result always reaches scratch |
 | `tools` (binding) | `dynamic_binding`, `core` | which tool schemas are sent each step (see below) |
 | `web` | `search_snippet_chars`, `search_max_results`, `fetch_inline_chars`, `jina_timeout`, `jina_retry_on_429`, `searxng_settings_path`, `searxng_source_dir`, `searxng_auto_clone` | search/fetch behaviour; `searxng_auto_clone` allows the first search to clone the SearXNG source if it isn't found (set `false` to require it be present) |
@@ -204,6 +204,16 @@ one cheap LLM call, and those messages are deleted from the checkpoint as well a
 the prompt. The split never separates a tool result from the message that requested it,
 and the details survive regardless: tool output is already on disk under a `scratch:` id.
 Counting uses `tiktoken` when installed and a `chars_per_token` estimate otherwise.
+
+Set `tokenizer_scale` to bridge the gap between OpenAI's tokenizer (which `tiktoken`
+uses) and the local model's actual tokenizer. Qwen and Llama models consistently produce
+more tokens than `cl100k_base` counts: set `tokenizer_scale` to ~1.18 (Qwen-9B), ~1.14
+(Llama-3-8B), or ~1.22 (Qwen-32B) so the compaction guard sees numbers the server sees.
+`/health` reports the scale when it is not 1.0.
+
+Set `keep_last_tokens` to a positive value (e.g. `2000`) to keep at least that many
+tokens' worth of messages verbatim, regardless of the message count. This prevents a
+single enormous tool result from eating the budget while being kept verbatim.
 
 Set `budget_tokens` to the context length the server is actually serving (`llama-server
 -c`), not the model's theoretical maximum.

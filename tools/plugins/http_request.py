@@ -107,3 +107,6 @@ TRIGGERS = {
         r"call .*(api|service|endpoint)|check .*(endpoint|health|status code))\b"
     ),
 }
+
+# Tool names from this plugin that should always be bound (added to tools.core).
+CORE = []
