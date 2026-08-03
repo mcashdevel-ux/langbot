@@ -7,16 +7,17 @@ holder (or, where assignment isn't permitted, licensed to it without restriction
 
 ## Where help is most wanted
 
-- **Tool coverage** — new agent tools in `components/` (each tool is a small, testable
+- **Tool coverage** *（PR #45: plugin tool system — new tools now go in `tools/plugins/`）* — additional tools
+  in {{langbot}} are always welcome. (each tool is a small, testable
   module; `langbot.py` only wires it up as a `@tool`). Anything returning potentially large
   output should go through `components/scratch.py` rather than into the model's context.
-- **Search engines** *（PR #42: multi-engine search + URL dedup + authority scoring）* — more engine adapters and deeper ranking improvements still welcome.
+- **Search engines** *（PR #42: multi-engine + dedup + authority scoring; PR #44: StackExchange + PubMed）* — more engine adapters and deeper ranking improvements still welcome.
   See `components/engines.py` / `components/web_tools.py`.
 - **Memory quality** *（PR #42: improved distillation + confidence scoring + auto-pruning）* — further improvements welcome, especially staleness detection and recall-frequency-based re-ranking.
   See `components/memory_store.py` / `components/memory_worker.py` / `housekeeping.py`.
 - **Model compatibility** — prompt and nudge tuning in `components/routing.py` for local
   models that stall, ask for permission, or emit tool calls as code blocks.
-- **Terminal UX** — `components/console.py` and `components/input.py` (rendering, streaming,
+- **Terminal UX** *（PR #44: context health bar, streaming search progress, tool timing）* — `components/console.py` and `components/input.py` (rendering, streaming,
   editing, paste handling).
 - **Safety** — sandboxing options for `execute_shell_command`, and stronger secret redaction
   in `components/vault.py`.
