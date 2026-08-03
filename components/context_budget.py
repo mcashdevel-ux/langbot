@@ -41,9 +41,20 @@ RESERVE_TOKENS = config.get("context.reserve_tokens", 2000)
 COMPACT_AT = config.get("context.compact_at", 0.7)
 # Messages always kept verbatim (the tail of the conversation).
 KEEP_LAST_MESSAGES = config.get("context.keep_last_messages", 12)
+# Minimum token count of messages to keep verbatim, as an alternative (or floor)
+# to message-count-based keeping.  When set above 0, split_for_compaction keeps
+# at least this many tokens' worth of recent messages regardless of the message
+# count.  Set to 0 to use only the message count.  Default 0 (disabled).
+KEEP_LAST_TOKENS = config.get("context.keep_last_tokens", 0)
 # Cap on the rolling summary itself, so it cannot grow into the problem it solves.
 SUMMARY_MAX_CHARS = config.get("context.summary_max_chars", 1500)
 CHARS_PER_TOKEN = config.get("context.chars_per_token", 4)
+# Multiplier applied to every token estimate.  cl100k_base (OpenAI's tokenizer)
+# consistently undercounts for Qwen and Llama tokenizers; set this to bridge the
+# gap until the estimate matches what the server counts.  Example values from
+# real sessions: Qwen-9B ~1.18, Llama-3-8B ~1.14, Qwen-32B ~1.22.
+# Default 1.0 keeps the status-quo for OpenAI-compatible tokenizers.
+TOKENIZER_SCALE = config.get("context.tokenizer_scale", 1.0)
 
 _encoding = None
 _encoding_loaded = False
@@ -69,8 +80,12 @@ def estimate_tokens(text: str) -> int:
         return 0
     encoding = _get_encoding()
     if encoding is not None:
-        return len(encoding.encode(text, disallowed_special=()))
-    return max(1, len(text) // CHARS_PER_TOKEN)
+        raw = len(encoding.encode(text, disallowed_special=()))
+    else:
+        raw = max(1, len(text) // CHARS_PER_TOKEN)
+    if TOKENIZER_SCALE != 1.0:
+        return max(1, int(raw * TOKENIZER_SCALE))
+    return raw
 
 
 def message_tokens(msg) -> int:
@@ -97,16 +112,48 @@ def compaction_threshold() -> int:
     return int(usable_budget() * COMPACT_AT)
 
 
-def split_for_compaction(messages, keep_last: int = KEEP_LAST_MESSAGES):
+def split_for_compaction(messages, keep_last: int = KEEP_LAST_MESSAGES,
+                          keep_last_tokens: int = KEEP_LAST_TOKENS):
     """Split ``messages`` into ``(older, recent)`` at a safe boundary.
 
     ``recent`` never starts with a tool message: a ToolMessage separated from
     the AI message that requested it is rejected by the chat API, so the split
     point walks backwards until the boundary sits before the whole tool round.
+
+    When ``keep_last_tokens > 0``, the split respects the larger of the
+    message-count floor and the token-count floor -- a single enormous tool
+    result will not silently eat the budget while being kept verbatim.
     """
-    if keep_last <= 0 or len(messages) <= keep_last:
+    # Determine the cut point: message-count floor first.
+    msg_count = max(0, keep_last)
+    if keep_last_tokens > 0:
+        # Walk from the tail, accumulating tokens until we have enough.
+        token_count = 0
+        i = len(messages) - 1
+        token_cut = 0
+        while i >= 0:
+            if i >= 1 and getattr(messages[i], "type", None) == "tool":
+                token_count += message_tokens(messages[i])
+                token_count += message_tokens(messages[i - 1])
+                i -= 2
+            else:
+                token_count += message_tokens(messages[i])
+                i -= 1
+            if token_count >= keep_last_tokens:
+                token_cut = i + 1
+                break
+        # Use the larger of the two floors — respect both the message-count
+        # and token-count minima.
+        if msg_count > 0:
+            cut = max(msg_count, len(messages) - token_cut)
+        else:
+            cut = len(messages) - token_cut
+    else:
+        cut = msg_count
+
+    if cut <= 0 or len(messages) <= cut:
         return [], list(messages)
-    cut = len(messages) - keep_last
+    cut = len(messages) - cut
     while cut > 0 and getattr(messages[cut], "type", None) == "tool":
         cut -= 1
     return list(messages[:cut]), list(messages[cut:])
@@ -151,14 +198,15 @@ def summary_prompt(messages, previous_summary: str = "") -> str:
 
 
 def compact(messages, summarize, previous_summary: str = "",
-            keep_last: int = KEEP_LAST_MESSAGES):
+            keep_last: int = KEEP_LAST_MESSAGES,
+            keep_last_tokens: int = KEEP_LAST_TOKENS):
     """Return ``(dropped, recent, summary)`` for a thread over budget.
 
     ``summarize`` takes a prompt and returns text; a failure there is not fatal
     (the turn proceeds uncompacted) because losing a turn to a summarizer error
     would be worse than being briefly over budget.
     """
-    older, recent = split_for_compaction(messages, keep_last)
+    older, recent = split_for_compaction(messages, keep_last, keep_last_tokens)
     if not older:
         return [], list(messages), previous_summary
     try:
@@ -302,9 +350,10 @@ def stats_summary() -> str:
         return "no agent steps yet"
     total_prefix = current["prefix_reused"] + current["prefix_reprocessed"]
     reuse = 100 * current["prefix_reused"] / total_prefix if total_prefix else 0
+    scale_note = f", scale x{TOKENIZER_SCALE:.2f}" if TOKENIZER_SCALE != 1.0 else ""
     parts = [
-        f"{current['steps']} steps, peak prompt {current['peak_prompt']} tokens "
-        f"(history {current['peak_history']}, overhead {current['peak_overhead']} "
+        f"{current['steps']} steps, peak prompt {current['peak_prompt']} tokens{scale_note}"
+        f" (history {current['peak_history']}, overhead {current['peak_overhead']} "
         f"of reserve {RESERVE_TOKENS}, schemas {current['peak_schemas']})",
         f"cache reuse {reuse:.0f}%",
         f"{current['compactions']} compactions dropping {current['tokens_dropped']} tokens",
