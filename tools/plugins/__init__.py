@@ -26,8 +26,9 @@ def discover_plugins():
     ``TRIGGERS`` are optional.
 
     Returns:
-        ``(tools, descriptions, triggers)`` where each is a merged dict/list from
-        all discovered plugins.
+        ``(tools, descriptions, triggers, core_tools)`` where each is a merged
+        list/dict/set from all discovered plugins.  ``core_tools`` is a set of
+        tool names whose plugins declared ``CORE = ["tool_name"]``.
     """
     all_tools: list = []
     all_descriptions: dict[str, str] = {}
@@ -57,4 +58,17 @@ def discover_plugins():
         if isinstance(mod_triggers, dict):
             all_triggers.update(mod_triggers)
 
-    return all_tools, all_descriptions, all_triggers
+    # Collect CORE tool names from plugins that declare them.
+    all_core: set[str] = set()
+    for _, name, _ in pkgutil.iter_modules(__path__):
+        if name.startswith("_"):
+            continue
+        try:
+            mod = importlib.import_module(f"{__name__}.{name}")
+        except Exception:
+            continue
+        mod_core = getattr(mod, "CORE", [])
+        if isinstance(mod_core, list):
+            all_core.update(mod_core)
+
+    return all_tools, all_descriptions, all_triggers, all_core

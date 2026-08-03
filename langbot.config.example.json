@@ -86,6 +86,8 @@
     "reserve_tokens": 2000,
     "compact_at": 0.7,
     "keep_last_messages": 12,
+    "keep_last_tokens": 0,
+    "tokenizer_scale": 1.0,
     "summary_max_chars": 1500,
     "chars_per_token": 4
   },
