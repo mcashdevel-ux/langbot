@@ -22,10 +22,8 @@ from .scratch import save_to_scratch, read_scratch  # noqa: F401 (re-exported)
 SEARCH_SNIPPET_CHARS = config.get("web.search_snippet_chars", 160)
 # hard cap, regardless of what the model asks for
 SEARCH_MAX_RESULTS = config.get("web.search_max_results", 5)
-# how much of a fetched page goes inline
+# how much of a fetched page goes inline; the whole page always reaches scratch
 FETCH_INLINE_CHARS = config.get("web.fetch_inline_chars", 1800)
-# how much of a fetched page we keep on disk at all
-FETCH_SAVE_CHARS = config.get("web.fetch_save_chars", 20000)
 JINA_TIMEOUT = config.get("web.jina_timeout", 25)
 # anonymous Jina reader is rate-limited; one retry
 JINA_RETRY_ON_429 = config.get("web.jina_retry_on_429", 1)
@@ -61,7 +59,6 @@ def search_web(query: str, engine: str = "duckduckgo", max_results: int = 5) -> 
     sid = save_to_scratch(
         json.dumps(results, indent=2, ensure_ascii=False),
         prefix="search",
-        max_bytes=FETCH_SAVE_CHARS,
     )
 
     lines = [f"Search results for '{query}' via {used_engine} (full data at scratch:{sid}):"]
@@ -102,7 +99,7 @@ def fetch_url(url: str) -> str:
     if not text:
         return f"fetch returned empty content for {url}"
 
-    sid = save_to_scratch(text, prefix="fetch", max_bytes=FETCH_SAVE_CHARS)
+    sid = save_to_scratch(text, prefix="fetch")
     preview = text[:FETCH_INLINE_CHARS]
     truncated = len(text) > FETCH_INLINE_CHARS
     note = f"\n...(truncated, full page saved as scratch:{sid} — use read_scratch to page through it)" if truncated else ""

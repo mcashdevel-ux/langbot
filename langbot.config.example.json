@@ -46,7 +46,6 @@
     "read_inline_chars": 1500,
     "grep_inline_lines": 20,
     "manyfiles_inline_chars": 4000,
-    "scratch_save_chars": 200000,
     "max_output_chars": 20000
   },
 
@@ -54,7 +53,6 @@
     "search_snippet_chars": 160,
     "search_max_results": 5,
     "fetch_inline_chars": 1800,
-    "fetch_save_chars": 20000,
     "jina_timeout": 25,
     "jina_retry_on_429": 1,
     "searxng_settings_path": "/etc/searxng/settings.yml",

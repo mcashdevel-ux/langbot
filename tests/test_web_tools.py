@@ -111,15 +111,15 @@ class TestFetchUrl:
         assert "short page" in out
         assert "truncated" not in out
 
-    def test_fetch_save_cap_still_applies(self, monkeypatch):
-        # The on-disk cap for fetched pages is unchanged by the move to
-        # scratch.py's larger default.
-        big = "q" * (web_tools.FETCH_SAVE_CHARS + 1000)
+    def test_whole_page_reaches_disk(self, monkeypatch):
+        # Only the inline preview is capped: what the note calls the full page
+        # must actually be the full page.
+        big = "q" * 300_000
         monkeypatch.setattr(web_tools.requests, "get", lambda url, **k: _FakeResp(big))
         out = web_tools.fetch_url("http://x")
         sid = out.split("scratch:")[1].split(" ")[0]
         path = os.path.join(scratch.SCRATCH_DIR, f"{sid}.txt")
-        assert os.path.getsize(path) == web_tools.FETCH_SAVE_CHARS
+        assert os.path.getsize(path) == len(big)
 
     def test_long_content_truncated_and_saved(self, monkeypatch):
         big = "q" * (web_tools.FETCH_INLINE_CHARS + 500)

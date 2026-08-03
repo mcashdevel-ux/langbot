@@ -5,6 +5,11 @@ preview to the model; ``read_scratch`` pages through the rest on demand. This
 keeps big results (web pages, file contents, grep output) out of the message
 thread while still reachable.
 
+What is saved is never truncated: capping belongs to the preview, which the
+model can always widen by paging. A scratch entry that silently lost its tail
+would be worse than no entry at all, because the preview advertises it as the
+full result.
+
 Near-leaf module by design — it depends only on ``config`` (itself dependency
 free), so any tool module can import it without risking an import cycle.
 """
@@ -18,22 +23,32 @@ SCRATCH_DIR = config.get("paths.scratch_dir", "./memory/agent_scratch",
                          env="AGENT_SCRATCH_DIR")
 os.makedirs(SCRATCH_DIR, exist_ok=True)
 
-# Default on-disk cap. Generous compared to what any tool shows inline: the
-# point of scratch is that the *full* result stays retrievable.
-SCRATCH_SAVE_CHARS = config.get("tools.scratch_save_chars", 200_000)
-
 
 def _new_scratch_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
 
-def save_to_scratch(content: str, prefix: str = "doc",
-                    max_bytes: int = SCRATCH_SAVE_CHARS) -> str:
+def save_to_scratch(content: str, prefix: str = "doc") -> str:
+    """Write ``content`` verbatim to a new scratch entry and return its id."""
     sid = _new_scratch_id(prefix)
     path = os.path.join(SCRATCH_DIR, f"{sid}.txt")
     with open(path, "w", encoding="utf-8") as f:
-        f.write(content[:max_bytes])
+        f.write(content)
     return sid
+
+
+def offload(content: str, prefix: str, inline_chars: int, label: str) -> str:
+    """Return ``content`` inline, or a preview plus a scratch id once it is
+    longer than ``inline_chars``.
+
+    ``label`` names what was saved ("full file", "full output", ...) and is
+    shown in the header so the model knows what paging will get it.
+    """
+    if len(content) <= inline_chars:
+        return content
+    sid = save_to_scratch(content, prefix=prefix)
+    return (f"{len(content)} chars, showing first {inline_chars} "
+            f"({label} at scratch:{sid}):\n{content[:inline_chars]}")
 
 
 def _valid_utf8_prefix_len(data: bytes) -> int:

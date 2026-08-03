@@ -119,8 +119,8 @@ Precedence for a single setting: **environment variable > config file > default.
 | `logging` | `level`, `console`, `max_bytes`, `backup_count` | log destination and verbosity (see below) |
 | `memory` | `collection_name`, `embedding_model`, `embedding_device`, `worker_queue_size`, `worker_batch_size`, `worker_shutdown_timeout`, `max_facts_per_turn` | background distiller + vector store |
 | `memory` (search) | `min_similarity`, `recall_overfetch`, `mmr_lambda`, `dedup_similarity`, `dedup_token_overlap`, `lexical_search`, `max_tags`, `auto_tags` | retrieval precision and tags (see below) |
-| `tools` | `read_inline_chars`, `grep_inline_lines`, `manyfiles_inline_chars`, `scratch_save_chars`, `max_output_chars` | how much tool output goes inline vs. to scratch |
-| `web` | `search_snippet_chars`, `search_max_results`, `fetch_inline_chars`, `fetch_save_chars`, `jina_timeout`, `jina_retry_on_429`, `searxng_settings_path`, `searxng_source_dir` | search/fetch behaviour |
+| `tools` | `read_inline_chars`, `grep_inline_lines`, `manyfiles_inline_chars`, `max_output_chars` | how much tool output goes inline; the full result always reaches scratch |
+| `web` | `search_snippet_chars`, `search_max_results`, `fetch_inline_chars`, `jina_timeout`, `jina_retry_on_429`, `searxng_settings_path`, `searxng_source_dir` | search/fetch behaviour |
 | `routing` | `max_nudges_per_turn`, `recursion_limit` | autonomy nudge budget per turn; graph steps per turn (two per tool round) |
 | `compat` | `repair_json_tool_calls`, `repair_max_candidates` | recover tool calls from models that print them as text (see below) |
 
