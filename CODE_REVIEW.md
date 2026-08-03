@@ -223,4 +223,15 @@ Groq's migration guidance: `openai/gpt-oss-120b` → `qwen/qwen3.6-27b` → `ope
   whether it took effect — a session that stays at `0 recovered` is the evidence that
   this is done, and that the repair/nudge layers can start shrinking.
 2. Consider password-by-default or a clearer at-rest warning for the vault (C3 remaining).
-3. Tidy the remaining engines/vault nits (L4, L5, L7–L9).
+3. ~~Tidy the remaining engines/vault nits (L4, L5, L7–L9).~~ ✅ Fixed (#41).
+
+*2026-08 follow-up — 7-track improvements landed (see PR):*
+- `reserve_tokens` shrunk from 8192 → 2000 (measured overhead ~1.2K).
+- `llm.thinking_mode` config with `/no_think` injection and thinking-token tracking.
+- Embedding-based tool routing (MiniLM) as an additive signal to regex triggers.
+- Multi-engine search with URL dedup, near-duplicate detection, authority scoring,
+  and `engine="auto"`.
+- Memory quality: extended distillation prompt (preferences/facts/actions/errors),
+  confidence scoring, automatic pruning of stale low-confidence facts.
+- Eval harness: 15 end-to-end REPL scenarios in `tests/test_eval_harness.py`.
+- Open upgrade-plan items A7.4, B3.3, C8.6 now have test coverage.

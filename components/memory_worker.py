@@ -49,11 +49,15 @@ You are a knowledge extraction module. Look at the following user request, the t
 results that were actually returned this turn, and the assistant's final response.
 Extract only factual information that is GROUNDED IN THE TOOL RESULTS — do not infer
 or store anything the assistant merely described doing without evidence in the tool output.
-Useful facts include:
-- User preferences (e.g., "the user prefers DuckDuckGo")
-- Confirmed facts from tool output (e.g., "project located at ~/code/myapp")
-- Decisions or conclusions that are supported by evidence
-- Context helpful for future interactions
+
+Extract three categories of facts (each optional):
+- **Preferences** — user preferences, conventions, habits (e.g. "the user prefers DuckDuckGo")
+- **Facts** — confirmed information from tool output (e.g. "project located at ~/code/myapp",
+  "port 8080 is in use by the dev server")
+- **Actions** — what was done this turn that matters for context (e.g. "created file setup.sh",
+  "started background task t-2 running the dev server")
+- **Errors** — errors encountered that should be remembered (e.g. "pip install failed because
+  Python 3.8 is not supported; needs >= 3.10")
 
 Every fact must be worth retrieving months from now, and must be readable on its own:
 - Name the subject. "the langbot repo lives at ~/ai/repos/langbot", never "it lives there".
@@ -61,6 +65,11 @@ Every fact must be worth retrieving months from now, and must be readable on its
 - NEVER store conversational noise: greetings, thanks, small talk, the fact that the user
   asked something, what you did this turn, or anything true only right now.
 - Prefer fewer, denser facts; at most {MAX_FACTS_PER_TURN}. An empty list is a good answer.
+
+Negative examples — do NOT store anything like:
+- "the user asked about X" — this is conversational noise
+- "I searched for X" — this describes what the assistant did, not what was learned
+- "the current time is 3pm" — ephemeral, not useful months from now
 
 User request: {job.user_text}
 Tool results this turn:
@@ -70,8 +79,8 @@ Assistant response: {job.ai_text}
 Return ONLY a JSON array of objects, each {{"fact": "...", "tags": ["..."]}} where
 "fact" is a standalone factual statement grounded in the tool results above and
 "tags" is 1-3 short lowercase category words (e.g. "preference", "filesystem",
-"credentials", "web", "project"). If nothing is clearly supported by evidence,
-return []. Do not include explanations, markdown, or extra text.
+"credentials", "web", "project", "error", "action"). If nothing is clearly supported
+by evidence, return []. Do not include explanations, markdown, or extra text.
 /no_think
 """  # /no_think disables Qwen3-style reasoning blocks; harmless to other models.
 

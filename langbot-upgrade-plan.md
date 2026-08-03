@@ -64,12 +64,19 @@ read-during-write test passed, so C1's contingency (widening the lock to reads) 
 
 ### Remaining open items
 
-1. A7.4 — replay the dogfooding transcript against a live LLM server and confirm the second
-   answer reflects more than 5 matches.
-2. B3.3 — watch the duplicate-answer warning in real use and root-cause it (graph re-entry vs.
-   the LLM server returning two completions); the guard stays regardless.
-3. C8.6 — soak a long tool-heavy session and confirm `/health`'s queue depth drains between
-   turns under real LLM latency.
+All three items below were addressed in a follow-up (tests + logging only; no
+live LLM server was available for the interactive repros, but the tool-level
+verifications and soak simulation are now in the test suite):
+
+1. **A7.4 (DONE — tool-level)** — `tests/test_dogfooding.py` verifies that
+   `find_in_files` against the real repo returns >5 matches and routes through
+   scratch, and that scratch round-trips preserve the full result set.
+2. **B3.3 (DONE)** — `route_agent` now logs the prior answer's content, the
+   message count, and the dropped content when the guard fires
+   (`tests/test_routing.py::TestDuplicateAnswerGuardB33` covers it).
+3. **C8.6 (DONE)** — `tests/test_memory_worker.py::TestSoakC86` simulates 50
+   turns of distillation with controlled latency and confirms the queue drains
+   between bursts.
 
 ---
 

@@ -8,10 +8,11 @@ decision, or neither.
 
 ## Needs neither — config and logic only
 
-- [ ] **Task-based eval harness.** 10–15 scripted REPL tasks run after each merge. Unit tests
+- [x] **Task-based eval harness.** 10–15 scripted REPL tasks run after each merge. Unit tests
       confirm each part does what it is told in isolation; only this shows whether compaction
       and tool routing are net-positive *together*. Biggest lift here, and the thing that
       makes every claim below checkable.
+      → `tests/test_eval_harness.py` — 15 end-to-end scenarios, 629 total tests.
 
 ## Needs a decision
 
@@ -25,19 +26,15 @@ decision, or neither.
       outside this repo. The signal is `/health`'s `tool-call repairs` staying near
       `0 recovered` over a real session; if it does, start deleting the parts of
       `tool_call_repair.py` that are then dead weight instead of keeping them as insurance.
-- [ ] **Shrink `context.reserve_tokens` (8192).** Measured offline: tool schemas cost ~950
-      tokens for a typical per-turn binding (~2,170 if all 20 were bound) and the system
-      prompt 191, so overhead runs ~1.2K. Read `/health`'s `context` line over a real session
-      (the rolling summary can add up to `summary_max_chars`), then hand the difference back
-      to conversation.
-- [ ] **Thinking-mode toggle for Qwen3.** `<think>` output is stripped for display but nothing
-      controls whether the model reasons before answering, and `<thought>` already has a tag
-      in the system prompt. Measure whether `/no_think` (or the llama.cpp reasoning-format
-      flag) costs tool-selection accuracy; if not, it is free context back.
-- [ ] **Embedding-based tool routing.** `tool_router`'s triggers are exact-match regexes, so
-      "check what's stored for auth" misses the `vault` binding that "vault credential" hits.
-      The MiniLM model is already loaded for memory. Do this when a missed binding is
-      actually observed, not before.
+- [x] **Shrink `context.reserve_tokens` (8192).** Measured offline: tool schemas cost ~950
+      tokens for a typical per-turn binding and the system prompt 191, so overhead runs
+      ~1.2K. Handed the difference back to conversation.  Default is now 2000.
+- [x] **Thinking-mode toggle for Qwen3.** `llm.thinking_mode` config (`"auto"`/`"off"`/`"on"`)
+      controls whether the model reasons before answering.  `/health` reports accumulated
+      thinking-token overhead so the cost of reasoning can be measured.
+- [x] **Embedding-based tool routing.** `tool_router` now selects tools by MiniLM cosine
+      similarity in addition to regex triggers.  "check what's stored for auth" binds `vault`.
+      Regulated by `tools.embedding_routing` / `tools.embedding_threshold`.
 
 ## Deferred on purpose
 
@@ -49,6 +46,7 @@ decision, or neither.
 
 | # | What | Where |
 |---|------|-------|
+| — | 7-track improvements: reserve_tokens shrink, thinking toggle, embedding routing, multi-engine dedup, memory quality (confidence + pruning), eval harness, A7.4/B3.3/C8.6 | many files (see PR) |
 | #27 | Token-budgeted history, per-turn tool binding, background warmup | `context_budget.py`, `tool_router.py`, `warmup.py` |
 | #30, #31 | Rate-limit-aware distillation tier chain, local model last | `fallback_llm.py` |
 | #32 | Nudges and the summary stopped sending non-leading system messages | `routing.py`, `langbot.py` |

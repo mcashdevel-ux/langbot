@@ -60,6 +60,20 @@ long-term memory (Chroma + sentence-transformers).
   it is produced, and the final answer is rendered as Markdown. Ctrl+C interrupts the current
   turn and returns to the prompt; Ctrl+D (or `quit`/`exit`) ends the session. The embedding
   model loads quietly (its `Loading weights` progress bars are suppressed).
+- **Thinking-mode toggle** — `llm.thinking_mode` (`"auto"`, `"off"`, `"on"`) controls
+  whether Qwen3-family models spend tokens on `<think>` reasoning blocks.  `/health` reports
+  accumulated thinking-token overhead.
+- **Embedding-based tool routing** — the already-loaded MiniLM model selects tools by
+  semantic similarity, so *"check what's stored for auth"* binds `vault` even without the
+  word "vault".  Controlled by `tools.embedding_routing` / `tools.embedding_threshold`;
+  regex triggers stay on as a secondary signal.
+- **Multi-engine search with dedup** — `search_web(engine="auto")` fans out to DuckDuckGo,
+  Wikipedia, arXiv, and GitHub concurrently, deduplicates results by URL and near-duplicate
+  title, and boosts authoritative sources (`.edu`, `.gov`, Wikipedia, etc.).
+- **Memory quality improvements** — the distiller extracts four categories (preferences,
+  facts, actions, errors) with explicit negative examples.  Facts carry a `confidence` score,
+  and on every startup stale low-confidence distilled facts are pruned automatically
+  (`memory.prune_age_days`, default 90).
 
 ## Requirements
 
@@ -127,6 +141,9 @@ Precedence for a single setting: **environment variable > config file > default.
 | `tools` | `read_inline_chars`, `grep_inline_lines`, `manyfiles_inline_chars`, `max_output_chars` | how much tool output goes inline; the full result always reaches scratch |
 | `tools` (binding) | `dynamic_binding`, `core` | which tool schemas are sent each step (see below) |
 | `web` | `search_snippet_chars`, `search_max_results`, `fetch_inline_chars`, `jina_timeout`, `jina_retry_on_429`, `searxng_settings_path`, `searxng_source_dir`, `searxng_auto_clone` | search/fetch behaviour; `searxng_auto_clone` allows the first search to clone the SearXNG source if it isn't found (set `false` to require it be present) |
+| `llm` (new) | `thinking_mode` | `"auto"` lets the model decide; `"off"` appends `/no_think` to suppress reasoning blocks; `"on"` explicitly requests them |
+| `tools` (binding) | `embedding_routing`, `embedding_threshold` | embedding-based tool selection (on by default); threshold for cosine similarity (default 0.35) |
+| `memory` (pruning) | `prune_age_days`, `prune_confidence_threshold`, `default_manual_confidence`, `default_distilled_confidence` | automatic removal of stale low-confidence facts; confidence defaults for manual vs distilled facts |
 | `routing` | `max_nudges_per_turn`, `recursion_limit`, `stagnation_guard`, `stagnation_exempt_tools` | nudges (not tool rounds) allowed per turn; graph steps per turn (two per tool round); repeated-call guard (see below) |
 | `compat` | `repair_json_tool_calls`, `repair_max_candidates` | recover tool calls from models that print them as text (see below) |
 | `housekeeping` | `enabled`, `scratch_max_age_days`, `scratch_max_total_mb`, `checkpoint_keep_threads` | start-up disk sweep (see below) |
@@ -229,10 +246,11 @@ So one sweep runs per start, on the warmup thread rather than the interactive lo
 | `scratch_max_age_days` | `7` | scratch entries older than this are deleted |
 | `scratch_max_total_mb` | `512` | after the age pass, oldest entries go until the directory fits |
 | `checkpoint_keep_threads` | `20` | checkpoint threads kept besides the active one; the rest are deleted and the DB `VACUUM`ed |
+| `prune_age_days` | `90` | distilled (non-manual) facts older than this with low confidence are pruned |
 
 The active thread is never pruned, recent scratch entries are kept regardless of size, and
-`0` disables either cap. `/health` reports what the last sweep freed. Set
-`housekeeping.enabled` to `false` to keep everything.
+`0` disables either cap.  Manual memory facts (`/save`) are never pruned.  `/health` reports
+what the last sweep freed.  Set `housekeeping.enabled` to `false` to keep everything.
 
 ### Serve tool calls, don't repair them
 
@@ -257,8 +275,16 @@ the nudges, and the code-block patterns are belt-and-braces rather than load-bea
 Every bound tool costs its JSON schema in the prompt on every step, and a small model
 picks worse from a longer menu. So only `tools.core` is always bound; the rest are added
 for a turn when the conversation mentions what they do, or once they have been used in
-that turn (see `components/tool_router.py`). Set `tools.dynamic_binding` to `false` to
-bind all twenty every step.
+that turn (see `components/tool_router.py`).
+
+Two signals decide what the conversation needs:
+1. **Keyword triggers** — fast regex patterns matched against the turn text.
+2. **Embedding similarity** — the MiniLM model (already loaded for memory) embeds the
+   turn text and each tool's description; tools within `tools.embedding_threshold` cosine
+   distance are added.  This is what lets *"check what's stored for auth"* bind `vault`.
+
+Set `tools.dynamic_binding` to `false` to bind all twenty every step; set
+`tools.embedding_routing` to `false` to use keyword-only routing.
 
 ### Memory search
 
@@ -367,11 +393,13 @@ conversation thread), `/info`, `/health`, `/config`, `/ls [dir]`, `/knowledge <q
 ### Tests
 
 The `components/` modules have a unit-test suite (the heavy LLM deps and a live LLM server
-are not required):
+are not required), plus an **end-to-end eval harness** (`tests/test_eval_harness.py`) that runs
+15 multi-turn scenarios through the real tool-routing, context-budget, and routing guardrails
+with canned LLM responses — no live model needed:
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest
+python -m pytest                    # 629 tests
 ```
 
 ### Available tools

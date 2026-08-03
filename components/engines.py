@@ -416,6 +416,227 @@ def list_engines() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Multi-engine search, result deduplication & authority scoring  (Track 10)
+# ---------------------------------------------------------------------------
+import concurrent.futures
+import re
+from urllib.parse import urlparse, urlunparse
+
+# Engines used when the caller asks for ``engine="auto"``.
+# Ordered: general-purpose first, then domain-specific fallbacks that engage
+# only when the query contains a matching keyword.
+_DEFAULT_MULTI_ENGINES = [
+    "duckduckgo", "wikipedia", "arxiv", "github",
+]
+
+# Domains whose results get a small authority bonus.
+_HIGH_AUTHORITY_DOMAINS = frozenset({
+    ".edu", ".gov", "wikipedia.org", "arxiv.org",
+    "github.com", "docs.python.org", "pypi.org",
+    "stackoverflow.com", "man7.org", "kernel.org",
+})
+
+# Domains that typically return spam or thin content — a light penalty.
+_LOW_QUALITY_DOMAINS = frozenset({
+    "pinterest.com", "quora.com", "tiktok.com",
+    "instagram.com", "facebook.com",
+})
+
+# URL tracking parameters that do not change the content; stripping them
+# increases the chance two URLs map to the same result.
+_TRACKING_PARAMS = re.compile(
+    r"(?:^|&)(?:utm_[a-z]+|fbclid|gclid|ref|source|mc_[a-z]+"
+    r"|_ga|_gl|yclid|msclkid|dclid|igshid|si|feature|wprov)"
+    r"(?:=[^&]*)?(?=&|$)",
+    re.I,
+)
+
+
+def _normalize_url(raw: str) -> str:
+    """Canonical URL form used for deduplication.
+
+    Lowercases the hostname, strips the default port, removes trailing slashes
+    on the path, drops known tracking parameters, and drops fragments — so two
+    links that resolve to the same document collapse into one.
+    """
+    if not raw:
+        return ""
+    parsed = urlparse(raw.strip())
+    netloc = (parsed.hostname or "").lower()
+    if parsed.port and parsed.port not in (80, 443):
+        netloc = f"{netloc}:{parsed.port}"
+    path = parsed.path.rstrip("/") or "/"
+    query = _TRACKING_PARAMS.sub("", parsed.query)
+    query = query.strip("&")
+    return urlunparse(("", netloc, path, "", query, ""))
+
+
+def _authority_score(url: str) -> float:
+    """Return a small bonus (positive) or penalty (negative) for a result's domain.
+
+    The bonus is small enough (~0.1) that genuine relevance still dominates,
+    but large enough to break ties between equal-scoring results from different
+    sources.
+    """
+    host = (urlparse(url).hostname or "").lower()
+    for domain in _HIGH_AUTHORITY_DOMAINS:
+        if host == domain or host.endswith("." + domain):
+            return 0.1
+    for domain in _LOW_QUALITY_DOMAINS:
+        if host == domain or host.endswith("." + domain):
+            return -0.15
+    return 0.0
+
+
+def _title_overlap(a: str, b: str) -> float:
+    """Fraction of shorter title's tokens also present in the longer one.
+
+    Returns 0.0 when either title is empty. Normalised to [0, 1].
+    """
+    ta = set((a or "").casefold().split())
+    tb = set((b or "").casefold().split())
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / min(len(ta), len(tb))
+
+
+def _dedup_results(results: "list[dict]") -> "list[dict]":
+    """Deduplicate search results across engines.
+
+    1. URL dedup — two results whose normalised URLs are equal collide; the one
+       with a longer ``content`` field wins (it has more information).
+    2. Near-duplicate title — if two results share >=70% of their title tokens,
+       the one with more content survives.
+
+    Returns the deduplicated list, preserving the original sort order.
+    """
+    seen_urls: "dict[str, int]" = {}
+    keep: "list[bool]" = [True] * len(results)
+
+    for i, r in enumerate(results):
+        url = _normalize_url(r.get("url", ""))
+        if not url:
+            continue
+        prev = seen_urls.get(url)
+        if prev is not None:
+            # Keep whichever has more content; ties favour the first seen.
+            prev_len = len(results[prev].get("content", "") or "")
+            this_len = len(r.get("content", "") or "")
+            if this_len > prev_len:
+                keep[prev] = False
+                seen_urls[url] = i
+            else:
+                keep[i] = False
+        else:
+            seen_urls[url] = i
+
+    # Near-duplicate title pass (only among still-kept results).
+    for i in range(len(results)):
+        if not keep[i]:
+            continue
+        title_i = results[i].get("title", "")
+        for j in range(i + 1, len(results)):
+            if not keep[j]:
+                continue
+            title_j = results[j].get("title", "")
+            if _title_overlap(title_i, title_j) >= 0.7:
+                content_i = len(results[i].get("content", "") or "")
+                content_j = len(results[j].get("content", "") or "")
+                if content_j > content_i:
+                    keep[i] = False
+                else:
+                    keep[j] = False
+
+    return [r for r, k in zip(results, keep) if k]
+
+
+def _categorize_query(query: str) -> str:
+    """Heuristic to pick the right engines for an ``engine="auto"`` search.
+
+    Returns one of: ``"general"``, ``"academic"``, ``"code"``, ``"wiki"``.
+    """
+    q = (query or "").casefold()
+    if any(w in q for w in ("arxiv", "paper", "research", "doi", "preprint", "citation")):
+        return "academic"
+    if any(w in q for w in ("github", "repo", "pull request", "issue", "commit",
+                             "python", "javascript", "rust", "golang", "code",
+                             "library", "package", "npm", "pip", "cargo")):
+        return "code"
+    if any(w in q for w in ("who is", "what is", "define", "definition",
+                             "wikipedia", "encyclopedia")):
+        return "wiki"
+    return "general"
+
+
+_AUTO_ENGINE_SETS = {
+    "general": ["duckduckgo", "wikipedia"],
+    "academic": ["arxiv", "wikipedia", "duckduckgo"],
+    "code": ["github", "duckduckgo"],
+    "wiki": ["wikipedia", "duckduckgo"],
+}
+
+
+def search_multi(
+    query: str,
+    engines: "list[str] | None" = None,
+    *,
+    pageno: int = 1,
+    safesearch: int = 0,
+    time_range: "str | None" = None,
+    lang: str = "en",
+    max_results: int = 10,
+    max_workers: int = 4,
+) -> "list[dict]":
+    """Run a query across multiple engines, deduplicate, and rank the merged result.
+
+    Args:
+        query: Search query string.
+        engines: Engine names; if ``None``, uses ``_DEFAULT_MULTI_ENGINES``.
+        max_workers: Maximum concurrent engine calls (default 4).
+
+    Returns:
+        Deduplicated list of result dicts, up to ``max_results`` entries.
+        Each dict carries an ``_authority`` key with the domain bonus.
+    """
+    engine_list = engines or list(_DEFAULT_MULTI_ENGINES)
+    if not engine_list:
+        return []
+
+    all_results: "list[dict]" = []
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(max_workers, len(engine_list))
+    ) as pool:
+        futures = {
+            pool.submit(
+                search_engine, name, query,
+                pageno=pageno, safesearch=safesearch,
+                time_range=time_range, lang=lang,
+                max_results=max(15, max_results * 2),  # over-fetch before dedup
+            ): name
+            for name in engine_list
+        }
+        for future in concurrent.futures.as_completed(futures):
+            name = futures[future]
+            try:
+                engine_results = future.result()
+            except Exception:
+                logger.warning("search_multi: engine %s failed, skipping", name,
+                               exc_info=True)
+                continue
+            all_results.extend(engine_results)
+
+    # Dedup and apply authority scoring.
+    deduped = _dedup_results(all_results)
+    for r in deduped:
+        r["_authority"] = _authority_score(r.get("url", ""))
+
+    # Re-sort: original engine order + authority bonus as tiebreaker.
+    deduped.sort(key=lambda r: r.get("_authority", 0.0), reverse=True)
+
+    return deduped[:max_results]
+
+
+# ---------------------------------------------------------------------------
 # Quick self-test
 # ---------------------------------------------------------------------------
 

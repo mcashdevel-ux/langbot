@@ -200,3 +200,20 @@ class TestSharedPrefixTokens:
 
     def test_no_previous_prompt_means_no_reuse(self):
         assert ctx.shared_prefix_tokens([], ["system:p"]) == 0
+
+
+class TestReserveTokensDefault:
+    """Track 5: the default reserve shrank from 8192 to 2000 after measurement."""
+
+    def test_default_reserve_is_2000(self):
+        assert ctx.RESERVE_TOKENS == 2000
+
+    def test_usable_budget_is_budget_minus_reserve(self):
+        # The default BUDGET_TOKENS is 32768, reserve is 2000.
+        expected = ctx.BUDGET_TOKENS - ctx.RESERVE_TOKENS
+        assert ctx.usable_budget() == expected
+        assert ctx.usable_budget() == 30768
+
+    def test_compaction_threshold_is_fraction_of_usable_budget(self):
+        threshold = ctx.compaction_threshold()
+        assert threshold == int(ctx.usable_budget() * ctx.COMPACT_AT)
