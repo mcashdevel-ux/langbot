@@ -22,7 +22,7 @@ requests to review. Several findings have since been addressed in follow-up PRs:
   completion signal.
 - **#36** — the start-up disk sweep (`housekeeping`). Closed L13 and L14.
 
-Statuses below reflect the **current** `main`, re-verified at `4c993e0` with a 556-test
+Statuses below reflect the **current** `main`, re-verified at `4c993e0` with a 629-test
 suite. Legend: ✅ fixed · ⚠️ partially addressed / mitigated · ⬜ open · ⚙️ intentional
 by design.
 
@@ -202,7 +202,7 @@ Groq's migration guidance: `openai/gpt-oss-120b` → `qwen/qwen3.6-27b` → `ope
   advertised commands (`/help`, `/quit`, `/new`, `/info`, `/health`, `/config`, `/ls`,
   `/knowledge`, `/save`).
 - **L12 (general):** ✅ Fixed — `requirements.txt`, `requirements-dev.txt` and a
-  `pyproject.toml` with `requires-python = ">=3.10"` now exist alongside a 556-test suite.
+  `pyproject.toml` with `requires-python = ">=3.10"` now exist alongside a 629-test suite.
 - **L13 (components/scratch.py):** ✅ Fixed — `components/housekeeping.py` sweeps
   `paths.scratch_dir` once per start on the warmup thread: entries older than
   `housekeeping.scratch_max_age_days` (7) go, then oldest-first until the directory fits
