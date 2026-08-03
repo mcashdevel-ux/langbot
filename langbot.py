@@ -8,6 +8,7 @@ os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
+import json
 import subprocess
 import logging
 import time
@@ -25,6 +26,7 @@ from components.logging_setup import log_path as _log_path, setup as _setup_logg
 _setup_logging()
 
 from langchain_core.tools import tool
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_core.messages import HumanMessage, RemoveMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, START, END, MessagesState
@@ -379,12 +381,32 @@ _TOOL_NAMES = {t.name for t in tools}
 _bound_llms: "dict[tuple[str, ...], object]" = {}
 
 
-def _llm_for(messages):
-    selected = _select_tools(tools, messages)
+_schema_tokens: "dict[tuple[str, ...], int]" = {}
+
+
+def _bind_tools(selected):
     key = tuple(t.name for t in selected)
     if key not in _bound_llms:
         _bound_llms[key] = llm.bind_tools(selected)
     return _bound_llms[key]
+
+
+def _tool_schema_tokens(selected) -> int:
+    """Tokens the bound tool schemas add to the prompt.
+
+    Counted from the JSON actually sent (`convert_to_openai_tool`), because this is
+    the number `context.reserve_tokens` was sized against, back when every tool was
+    bound on every step.
+    """
+    key = tuple(t.name for t in selected)
+    if key not in _schema_tokens:
+        try:
+            payload = json.dumps([convert_to_openai_tool(t) for t in selected])
+        except Exception:
+            logger.debug("context: could not render tool schemas", exc_info=True)
+            return 0
+        _schema_tokens[key] = _ctx.estimate_tokens(payload)
+    return _schema_tokens[key]
 
 # Argument names weak models reach for instead of the real ones. Renaming them is
 # strictly better than letting the call fail on an unexpected keyword; only
@@ -427,6 +449,27 @@ class AgentState(MessagesState):
     summary: str
 
 
+# Previous step's prompt, rendered per message, so the next step can measure how
+# much of it a prompt-caching server could still reuse (see _ctx.record_step).
+_last_prompt: "list[str]" = []
+
+
+def _record_prompt(messages, selected) -> None:
+    """Account for one step's prompt: overhead vs history, and cache reuse."""
+    global _last_prompt
+    rendered = [f"{getattr(m, 'type', '?')}:{getattr(m, 'content', '')}" for m in messages]
+    schemas = _tool_schema_tokens(selected)
+    lead = _ctx.message_tokens(messages[0])
+    history = _ctx.total_tokens(messages[1:])
+    _ctx.record_step(
+        history_tokens=history,
+        overhead_tokens=lead + schemas,
+        schema_tokens=schemas,
+        prefix_tokens=_ctx.shared_prefix_tokens(_last_prompt, rendered),
+    )
+    _last_prompt = rendered
+
+
 def agent(state: AgentState):
     summary = state.get("summary") or ""
     # One system message, always first: served chat templates commonly reject a
@@ -440,7 +483,9 @@ def agent(state: AgentState):
         lead = system_prompt
     messages = [lead]
     messages += state["messages"]
-    response = _llm_for(state["messages"]).invoke(messages)
+    selected = _select_tools(tools, state["messages"])
+    _record_prompt(messages, selected)
+    response = _bind_tools(selected).invoke(messages)
     # Small local models often print the call they meant to make instead of
     # using the tool-calling channel; recover those so they actually execute.
     repair_message(response, _TOOL_NAMES, _ARG_ALIASES)
@@ -542,7 +587,7 @@ def compact_context(state: AgentState):
     removable = [m for m in dropped if getattr(m, "id", None)]
     if not removable:
         return {}
-    logger.info("context: compacted %d messages into the summary", len(removable))
+    _ctx.record_compaction(len(removable), _ctx.total_tokens(removable))
     return {
         "messages": [RemoveMessage(id=m.id) for m in removable],
         "summary": new_summary,
@@ -787,6 +832,7 @@ def _handle_slash(text: str, config: dict) -> bool:
         ui.kv("distillation", _distill_llm.describe())
         ui.kv("warmup", _warmup.summary())
         ui.kv("disk freed at start", _sweep_summary)
+        ui.kv("context", _ctx.stats_summary())
         ui.kv("vault creds", str(len(_VAULT_ENV_LOADED)))
         ui.kv("bg tasks", str(len(_tasks.manager.list())))
         ui.kv("log file", str(_log_path() or "(stderr)"))
