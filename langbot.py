@@ -46,11 +46,13 @@ from components.utils import MAX_OUTPUT_CHARS, truncate
 from components.config import CONFIG_ENV_VAR, CONFIG_FILENAME, config as app_config
 from components.memory_store import (
     count as _memory_count,
+    get_collection as _memory_collection,
     get_embeddings as _load_embeddings,
     search_memories as _search_memories,
     store_memory as _store_memory,
 )
 from components.memory_worker import DistillJob, MemoryWorker
+from components.warmup import Warmup
 from components.file_ops import (
     read_file as _read_file,
     write_file as _write_file,
@@ -111,9 +113,14 @@ llm = ChatOpenAI(
     max_retries=LLM_MAX_RETRIES,
 )
 
-# Warm the embedding model up front rather than on the first remember/recall,
-# so its (quiet, multi-second) load happens at startup instead of mid-turn.
-_load_embeddings()
+# The embedding model and the Chroma collection cost seconds to build. Warm them
+# on a background thread from main() so the REPL is usable immediately; the memory
+# tools do not consult this, since memory_store loads on first use under its own
+# lock either way (see components/warmup.py).
+_warmup = Warmup({
+    "embeddings": lambda: _load_embeddings(announce=False),
+    "memory store": _memory_collection,
+})
 
 # ------------------------------------------------------------------------------
 # 2. Semantic Memory Store (components/memory_store.py) + background distiller
@@ -637,6 +644,7 @@ def _handle_slash(text: str, config: dict) -> bool:
         ui.kv("memories", str(_memory_count()))
         ui.kv("memory queue depth", str(_memory_worker.qsize()))
         ui.kv("memory jobs dropped", str(_memory_worker.dropped_count()))
+        ui.kv("warmup", _warmup.summary())
         ui.kv("vault creds", str(len(_VAULT_ENV_LOADED)))
         ui.kv("bg tasks", str(len(_tasks.manager.list())))
         ui.kv("log file", str(_log_path() or "(stderr)"))
@@ -743,6 +751,7 @@ def main() -> None:
         ui.warning("langgraph-checkpoint-sqlite is not installed — conversation history "
                    "will not persist.")
     ui.startup_tip(LLM_MODEL)
+    _warmup.start()
     session_id = f"session_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
     config = {
         "configurable": {"thread_id": session_id},
