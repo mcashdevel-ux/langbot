@@ -78,17 +78,20 @@ _client = None
 _collection = None
 
 
-def get_embeddings():
+def get_embeddings(announce: bool = True):
     """Return the embedding model, loading it (quietly) on first use.
 
     The heavy transformers/tqdm progress output goes to the raw stderr fd, so it
-    is muted at the fd level while the weights load.
+    is muted at the fd level while the weights load. Pass ``announce=False``
+    when loading off the main thread, so the progress notes cannot land in the
+    middle of the REPL's prompt.
     """
     global _embeddings
     with _init_lock:
         if _embeddings is not None:
             return _embeddings
-        ui.info("Loading embedding model...")
+        if announce:
+            ui.info("Loading embedding model...")
         try:
             import transformers  # noqa: WPS433 (optional, only to quiet it)
 
@@ -104,7 +107,8 @@ def get_embeddings():
                 model_kwargs={'device': EMBEDDING_DEVICE},
                 encode_kwargs={'normalize_embeddings': True},
             )
-        ui.success("Embedding model ready.")
+        if announce:
+            ui.success("Embedding model ready.")
         return _embeddings
 
 
