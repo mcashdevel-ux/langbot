@@ -127,7 +127,7 @@ Precedence for a single setting: **environment variable > config file > default.
 | `tools` | `read_inline_chars`, `grep_inline_lines`, `manyfiles_inline_chars`, `max_output_chars` | how much tool output goes inline; the full result always reaches scratch |
 | `tools` (binding) | `dynamic_binding`, `core` | which tool schemas are sent each step (see below) |
 | `web` | `search_snippet_chars`, `search_max_results`, `fetch_inline_chars`, `jina_timeout`, `jina_retry_on_429`, `searxng_settings_path`, `searxng_source_dir` | search/fetch behaviour |
-| `routing` | `max_nudges_per_turn`, `recursion_limit` | nudges (not tool rounds) allowed per turn; graph steps per turn (two per tool round) |
+| `routing` | `max_nudges_per_turn`, `recursion_limit`, `stagnation_guard`, `stagnation_exempt_tools` | nudges (not tool rounds) allowed per turn; graph steps per turn (two per tool round); repeated-call guard (see below) |
 | `compat` | `repair_json_tool_calls`, `repair_max_candidates` | recover tool calls from models that print them as text (see below) |
 | `housekeeping` | `enabled`, `scratch_max_age_days`, `scratch_max_total_mb`, `checkpoint_keep_threads` | start-up disk sweep (see below) |
 
@@ -181,6 +181,20 @@ Counting uses `tiktoken` when installed and a `chars_per_token` estimate otherwi
 
 Set `budget_tokens` to the context length the server is actually serving (`llama-server
 -c`), not the model's theoretical maximum.
+
+### Stagnation guard
+
+A model that has lost the thread re-issues a call it already made, verbatim, and every
+repeat costs a full re-send of the window plus whatever the tool does — re-running a shell
+command or re-fetching a page. So a tool call identical to one already made *in the same
+turn* (same name, same arguments, key order ignored) is answered from the transcript instead
+of executed: the model gets a `ToolMessage` telling it the result is already above.
+
+Repeats are counted per human turn, and nudges don't reset that count. Tools whose answer is
+meant to change between identical calls are exempt — polling a background task is progress,
+not a loop — via `routing.stagnation_exempt_tools` (`task_status`, `task_output`,
+`task_list` by default). A batch with one repeat and one new call still runs the new one.
+Set `routing.stagnation_guard` to `false` to execute everything.
 
 ### Disk housekeeping
 
