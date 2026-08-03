@@ -170,6 +170,7 @@ class TestExampleFile:
         import components.file_ops as file_ops
         import components.logging_setup as logging_setup
         import components.memory_worker as memory_worker
+        import components.routing as routing
         import components.tool_call_repair as tool_call_repair
         import components.web_tools as web_tools
 
@@ -188,3 +189,5 @@ class TestExampleFile:
         assert example["logging"]["console"] == logging_setup.LOG_TO_CONSOLE
         assert example["logging"]["max_bytes"] == logging_setup.LOG_MAX_BYTES
         assert example["logging"]["backup_count"] == logging_setup.LOG_BACKUP_COUNT
+        assert example["routing"]["max_nudges_per_turn"] == routing.MAX_NUDGES_PER_TURN
+        assert example["routing"]["recursion_limit"] == routing.RECURSION_LIMIT
