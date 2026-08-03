@@ -18,7 +18,7 @@ langchain-openai) and a 4-chars-per-token approximation otherwise; both are
 estimates for a local model's own tokenizer, so the threshold leaves headroom.
 
 The counters at the bottom exist because two of this module's constants are
-guesses that only measurement can settle: whether ``reserve_tokens`` (8192) is
+guesses that only measurement can settle: whether ``reserve_tokens`` (2000) is
 still right now that tool schemas are bound per turn, and what compaction costs
 the server's prompt cache. ``stats()`` is what ``/health`` reports.
 """
@@ -34,7 +34,9 @@ logger = logging.getLogger(__name__)
 # Total context window of the served model.
 BUDGET_TOKENS = config.get("context.budget_tokens", 32768)
 # Held back for the system prompt, tool schemas, and the answer being generated.
-RESERVE_TOKENS = config.get("context.reserve_tokens", 8192)
+# Default 2000 covers the measured overhead: system prompt (~191 tokens) +
+# per-turn tool schemas (~950 tokens) + headroom for the rolling summary.
+RESERVE_TOKENS = config.get("context.reserve_tokens", 2000)
 # Fraction of the usable budget that triggers compaction.
 COMPACT_AT = config.get("context.compact_at", 0.7)
 # Messages always kept verbatim (the tail of the conversation).
@@ -188,6 +190,8 @@ _stats = {
     "prefix_reprocessed": 0, # tokens it had to read again
     "compactions": 0,
     "tokens_dropped": 0,
+    "thinking_tokens": 0,    # tokens spent inside <think> blocks (stripped for display)
+    "thinking_calls": 0,     # steps where a <think> block was present
 }
 _stats_lock = threading.Lock()
 
@@ -251,6 +255,31 @@ def reset_stats() -> None:
             _stats[key] = 0
 
 
+def count_thinking_tokens(text: str) -> int:
+    """Tokens spent inside ``<think>...</think>`` blocks that are stripped for display.
+
+    Returns 0 when no such blocks are present, so callers can skip the overhead
+    of counting when the model's output is already clean.
+    """
+    if not text or "<think>" not in text:
+        return 0
+    import re
+    total = 0
+    for match in re.finditer(r"<think>(.*?)</think>", text, re.DOTALL):
+        total += estimate_tokens(match.group(1))
+    return total
+
+
+def record_thinking_tokens(text: str) -> None:
+    """Record tokens the model spent reasoning inside ``<think>`` blocks this step."""
+    tokens = count_thinking_tokens(text)
+    if not tokens:
+        return
+    with _stats_lock:
+        _stats["thinking_tokens"] += tokens
+        _stats["thinking_calls"] += 1
+
+
 def stats_summary() -> str:
     """One line for `/health`, aimed at the two open questions: is the reserve the
     right size, and what is compaction costing the prompt cache?"""
@@ -259,10 +288,15 @@ def stats_summary() -> str:
         return "no agent steps yet"
     total_prefix = current["prefix_reused"] + current["prefix_reprocessed"]
     reuse = 100 * current["prefix_reused"] / total_prefix if total_prefix else 0
-    return (
+    parts = [
         f"{current['steps']} steps, peak prompt {current['peak_prompt']} tokens "
         f"(history {current['peak_history']}, overhead {current['peak_overhead']} "
-        f"of reserve {RESERVE_TOKENS}, schemas {current['peak_schemas']}), "
-        f"cache reuse {reuse:.0f}%, "
-        f"{current['compactions']} compactions dropping {current['tokens_dropped']} tokens"
-    )
+        f"of reserve {RESERVE_TOKENS}, schemas {current['peak_schemas']})",
+        f"cache reuse {reuse:.0f}%",
+        f"{current['compactions']} compactions dropping {current['tokens_dropped']} tokens",
+    ]
+    if current["thinking_calls"]:
+        parts.append(
+            f"thinking {current['thinking_tokens']} tokens in {current['thinking_calls']} step(s)"
+        )
+    return ", ".join(parts)

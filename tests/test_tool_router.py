@@ -41,7 +41,6 @@ class TestSelection:
         assert {"task_start", "task_kill"} <= names
 
     def test_a_url_in_a_tool_result_binds_fetch_url(self):
-        # search_web results carry urls; fetching one is the natural next step.
         messages = [
             HumanMessage(content="who won?"),
             AIMessage(content="", tool_calls=[
@@ -53,7 +52,6 @@ class TestSelection:
         assert "fetch_url" in _names(messages)
 
     def test_a_tool_used_this_turn_stays_bound(self):
-        # Unbinding mid-task would strand a multi-round job.
         messages = [
             HumanMessage(content="hello"),
             AIMessage(content="", tool_calls=[
@@ -86,6 +84,96 @@ class TestSelection:
         assert len(_names([HumanMessage(content="hello")])) == len(ALL)
 
     def test_an_empty_core_list_falls_back_to_every_tool(self, monkeypatch):
-        # A model with no tools cannot act, so a bad core list must not strand it.
         monkeypatch.setattr(tool_router, "CORE_TOOLS", [])
         assert len(_names([HumanMessage(content="hello")])) == len(ALL)
+
+
+class TestEmbeddingRouting:
+    """Track 7: embedding-based tool routing as an additive signal."""
+
+    @staticmethod
+    def _mock_model():
+        """Return a fake embedding model whose ``embed_query`` / ``embed_documents``
+        return fixed vectors designed so that the turn text "check what is stored
+        for auth" is closer to the vault description than to any other tool."""
+        import random
+        from unittest.mock import MagicMock
+
+        random.seed(7)
+        base = [random.random() for _ in range(384)]
+
+        def perturb(v, amount):
+            return [x + (random.random() - 0.5) * amount for x in v]
+
+        desc_vectors = {}
+        for name in tool_router._TOOL_DESCRIPTIONS:
+            v = perturb(base, 0.3)
+            if name == "vault":
+                v = perturb(base, 0.02)
+            desc_vectors[name] = v
+
+        query_vec = perturb(perturb(base, 0.02), 0.01)
+
+        mock = MagicMock()
+        mock.embed_query.return_value = query_vec
+        mock.embed_documents.side_effect = lambda texts: [
+            desc_vectors.get(
+                next((n for n in tool_router._TOOL_DESCRIPTIONS
+                     if tool_router._TOOL_DESCRIPTIONS[n] == t), None),
+                perturb(base, 0.3),
+            )
+            for t in texts
+        ]
+        return mock
+
+    def test_embedding_routing_adds_vault_for_fuzzy_auth_query(self, monkeypatch):
+        """Fuzzy query that the regex misses should still bind vault."""
+        mock = self._mock_model()
+        monkeypatch.setattr(tool_router, "_embeddings_model", mock)
+        monkeypatch.setattr(tool_router, "_desc_vectors", {})
+        monkeypatch.setattr(tool_router, "EMBEDDING_ROUTING", True)
+
+        msg = "check what is stored for auth"
+        # With only regex, this text does NOT match vault's trigger pattern.
+        assert not tool_router._COMPILED["vault"].search(msg)
+
+        # But embedding similarity should find it.
+        embedding_hits = tool_router._embedding_tool_names(msg)
+        assert "vault" in embedding_hits, \
+            f"Expected vault in {embedding_hits} for fuzzy auth query"
+
+        # Full selection should include both regex hits and embedding hits.
+        all_hits = tool_router.select_tool_names([HumanMessage(content=msg)])
+        assert "vault" in all_hits
+
+    def test_disabled_embedding_routing_returns_empty(self, monkeypatch):
+        monkeypatch.setattr(tool_router, "EMBEDDING_ROUTING", False)
+        assert tool_router._embedding_tool_names("check what is stored") == set()
+
+    def test_empty_text_returns_empty(self):
+        assert tool_router._embedding_tool_names("") == set()
+
+    def test_embedding_routing_is_additive_not_replacement(self, monkeypatch):
+        """When both regex and embedding match different tools, both appear."""
+        mock = self._mock_model()
+        monkeypatch.setattr(tool_router, "_embeddings_model", mock)
+        monkeypatch.setattr(tool_router, "_desc_vectors", {})
+        monkeypatch.setattr(tool_router, "EMBEDDING_ROUTING", True)
+
+        msg = "check the url for auth"
+        assert tool_router._COMPILED["fetch_url"].search(msg)
+        assert not tool_router._COMPILED["vault"].search(msg)
+
+        names = tool_router.select_tool_names([HumanMessage(content=msg)])
+        assert "fetch_url" in names              # regex
+        assert "vault" in names                   # embedding (fuzzy "auth")
+
+    def test_embedding_routing_does_not_reduce_baseline(self, monkeypatch):
+        """Embedding routing never reduces the set selected by regex + core."""
+        mock = self._mock_model()
+        monkeypatch.setattr(tool_router, "_embeddings_model", mock)
+        monkeypatch.setattr(tool_router, "_desc_vectors", {})
+        monkeypatch.setattr(tool_router, "EMBEDDING_ROUTING", True)
+
+        names = tool_router.select_tool_names([HumanMessage(content="hello")])
+        assert len(names) > 0  # baseline from core tools

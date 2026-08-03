@@ -106,6 +106,7 @@ BASE_URL = app_config.get("llm.base_url", "http://127.0.0.1:8080/v1")
 LLM_MODEL = app_config.get("llm.model", "local-model")
 LLM_TEMPERATURE = app_config.get("llm.temperature", 0.1)
 LLM_MAX_RETRIES = app_config.get("llm.max_retries", 10)
+THINKING_MODE = app_config.get("llm.thinking_mode", "auto")
 SQLITE_DB_PATH = app_config.get("paths.checkpoint_db", "./memory/agent_checkpoints.db")
 
 # ------------------------------------------------------------------------------
@@ -441,6 +442,25 @@ system_prompt = SystemMessage(content=(
     '{"action": "list"}, not by saying you will check.'
 ))
 
+
+def _thinking_directive() -> str:
+    """Return the thinking-mode suffix to append to the system prompt.
+
+    ``/no_think`` suppresses Qwen3-family reasoning blocks; ``/think`` explicitly
+    requests them.  ``"auto"`` (the default) leaves the model to decide.  The
+    directive is appended as a trailing line so it does not alter the body of the
+    prompt.
+    """
+    mode = THINKING_MODE
+    if mode == "off":
+        return "\n/no_think"
+    if mode == "on":
+        return "\n/think"
+    return ""
+
+
+_NO_THINK_SUFFIX = _thinking_directive()
+
 # ------------------------------------------------------------------------------
 # 5. Agent Node
 # ------------------------------------------------------------------------------
@@ -477,10 +497,10 @@ def agent(state: AgentState):
     # rolling summary is folded into the prompt rather than sent beside it.
     if summary:
         lead = SystemMessage(
-            content=f"{system_prompt.content}\n\nEarlier in this session:\n{summary}"
+            content=f"{system_prompt.content}{_NO_THINK_SUFFIX}\n\nEarlier in this session:\n{summary}"
         )
     else:
-        lead = system_prompt
+        lead = SystemMessage(content=system_prompt.content + _NO_THINK_SUFFIX)
     messages = [lead]
     messages += state["messages"]
     selected = _select_tools(tools, state["messages"])
@@ -489,6 +509,8 @@ def agent(state: AgentState):
     # Small local models often print the call they meant to make instead of
     # using the tool-calling channel; recover those so they actually execute.
     repair_message(response, _TOOL_NAMES, _ARG_ALIASES)
+    # Track tokens the model spent in <think> blocks that get stripped for display.
+    _ctx.record_thinking_tokens(response.content if hasattr(response, "content") else "")
     return {"messages": [response]}
 
 # ------------------------------------------------------------------------------
