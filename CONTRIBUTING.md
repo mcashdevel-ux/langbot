@@ -54,10 +54,9 @@ tested in isolation. To run the agent itself you need a local OpenAI-compatible 
    read from the vault must stay redacted in tool output.
 7. **Match the surrounding style.** Standard-library-only where practical, module-level
    docstrings explaining *why*, and comments only where the code can't speak for itself.
-8. **Run the suite before pushing:** `python -m pytest` (all tests must pass). CI
-   (`.github/workflows/tests.yml`) re-runs it on every pull request against Python 3.10 and
-   3.13, with Hugging Face offline mode on so a test that reaches for the network fails
-   there instead of quietly downloading a model on the next person's machine.
+8. **Run the suite before pushing:** `python -m pytest` (all tests must pass). There is no
+   CI, so this is the only gate: the suite must also pass with an empty Hugging Face cache
+   and `HF_HUB_OFFLINE=1`, which is what rule 2 means in practice.
 
 ## Pull requests
 
