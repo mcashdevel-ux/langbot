@@ -284,3 +284,49 @@ class TestStagnationGuard:
     def test_a_message_without_tool_calls_is_a_no_op(self):
         msgs = [HumanMessage(content="go"), AIMessage(content="done")]
         assert routing.split_repeated_calls(msgs) == ([], [])
+
+
+class TestDuplicateAnswerGuardB33:
+    """B3.3: enhanced duplicate-answer root-cause diagnostics."""
+
+    def test_guard_logs_prior_answer_for_root_cause(self, caplog):
+        """When the duplicate-answer guard fires, the log must carry the prior
+        answer's content so the root cause can be diagnosed."""
+        import logging
+        caplog.set_level(logging.WARNING)
+        state = _state(
+            HumanMessage(content="hi"),
+            AIMessage(content="The project is at ~/code/myapp."),
+            AIMessage(content="The project lives at ~/code/myapp, as mentioned."),
+        )
+        assert routing.route_agent(state) == "distill"
+        assert "duplicate final answer" in caplog.text
+        assert "The project is at" in caplog.text
+        assert "prior answer preview" in caplog.text
+
+    def test_guard_with_interleaved_tool_calls_still_blocks_second_answer(self):
+        """A no-tool-call answer after tool use, followed by another, is still a
+        duplicate — the guard counts only no-tool-call answers."""
+        state = _state(
+            HumanMessage(content="hi"),
+            AIMessage(content="", tool_calls=[
+                {"name": "recall", "args": {"query": "q"}, "id": "1"},
+            ]),
+            ToolMessage(content="result", tool_call_id="1", name="recall"),
+            AIMessage(content="here is what I found"),
+            AIMessage(content="as I said, here is what I found"),
+        )
+        assert routing.route_agent(state) == "distill"
+
+    def test_log_includes_message_count(self, caplog):
+        """The log should carry the message count to help determine if the
+        duplication is a graph re-entry or a server double-completion."""
+        import logging
+        caplog.set_level(logging.WARNING)
+        state = _state(
+            HumanMessage(content="hi"),
+            AIMessage(content="first response"),
+            AIMessage(content="second response"),
+        )
+        routing.route_agent(state)
+        assert "messages total" in caplog.text

@@ -235,9 +235,23 @@ def route_agent(state):
 
     if last_msg.type == "ai" and isinstance(getattr(last_msg, "content", None), str):
         if final_answers_since_human(messages[:-1]) > 0:
+            # Find the prior final answer so the log carries enough context to
+            # root-cause the duplication: same-turn re-entry, server double-
+            # completion, or a nudge that wasn't recognised as one.
+            prior = ""
+            for m in reversed(messages[:-1]):
+                if (getattr(m, "type", None) == "ai"
+                        and not (getattr(m, "tool_calls", None) or [])):
+                    prior = getattr(m, "content", "")[:200]
+                    break
             logger.warning(
                 "route_agent: dropping a duplicate final answer this turn "
-                "(content preview: %r)", last_msg.content[:120]
+                "(step %d in thread, %d messages total; "
+                "prior answer preview: %r; "
+                "dropped content preview: %r)",
+                len(messages), len(messages),
+                prior,
+                last_msg.content[:200],
             )
             return "distill"
 

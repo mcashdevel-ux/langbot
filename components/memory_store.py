@@ -255,13 +255,26 @@ class Memory:
 # ------------------------------------------------------------------------------
 # Writes
 # ------------------------------------------------------------------------------
-def _metadata(text: str, timestamp: str, source: str, tags: "list[str]") -> dict:
+# Confidence defaults. Manual facts (/save, remember tool) are 1.0; distilled
+# facts get a lower default because the distiller operates on truncated context.
+DEFAULT_MANUAL_CONFIDENCE = config.get("memory.default_manual_confidence", 1.0)
+DEFAULT_DISTILLED_CONFIDENCE = config.get("memory.default_distilled_confidence", 0.7)
+
+# Pruning: facts older than this many days with confidence below the threshold
+# are eligible for automatic removal on startup (see components/housekeeping.py).
+PRUNE_AGE_DAYS = config.get("memory.prune_age_days", 90)
+PRUNE_CONFIDENCE_THRESHOLD = config.get("memory.prune_confidence_threshold", 0.8)
+
+
+def _metadata(text: str, timestamp: str, source: str, tags: "list[str]",
+              confidence: float = DEFAULT_DISTILLED_CONFIDENCE) -> dict:
     return {
         "text": text,
         "norm": normalize(text),
         "timestamp": timestamp,
         "source": source,
         "tags": ",".join(tags),
+        "confidence": str(round(confidence, 3)),
     }
 
 
@@ -337,7 +350,8 @@ def _duplicate_of(collection, text: str, vector) -> "str | None":
     return None
 
 
-def store_memory(text: str, source: str = "manual", tags: "list[str] | None" = None) -> str:
+def store_memory(text: str, source: str = "manual", tags: "list[str] | None" = None,
+                 confidence: "float | None" = None) -> str:
     """Store one fact and return its id — the *existing* id if it is a duplicate.
 
     Callers get an id either way, so "already known" is not an error; only the
@@ -348,6 +362,9 @@ def store_memory(text: str, source: str = "manual", tags: "list[str] | None" = N
     if not text:
         raise ValueError("cannot store an empty memory")
     tag_list = _effective_tags(text, tags)
+    if confidence is None:
+        confidence = (DEFAULT_MANUAL_CONFIDENCE if source in ("manual", "supabase")
+                      else DEFAULT_DISTILLED_CONFIDENCE)
     vector = get_embeddings().embed_query(text)
     collection = get_collection()
     mem_id = str(uuid.uuid4())
@@ -361,7 +378,7 @@ def store_memory(text: str, source: str = "manual", tags: "list[str] | None" = N
             ids=[mem_id],
             embeddings=[vector],
             documents=[_document(normalize(text), tag_list)],
-            metadatas=[_metadata(text, _now_iso(), source, tag_list)],
+            metadatas=[_metadata(text, _now_iso(), source, tag_list, confidence)],
         )
     return mem_id
 
@@ -371,6 +388,7 @@ def store_memories_batch(
     timestamps: "list[str] | None" = None,
     source: str = "distilled",
     tags_list: "list[list[str]] | None" = None,
+    confidence: "float | None" = None,
 ) -> list[str]:
     """Store many facts with a single ``embed_documents`` call.
 
@@ -386,6 +404,9 @@ def store_memories_batch(
     now = _now_iso()
     stamps = list(timestamps or [])
     stamps += [now] * (len(texts) - len(stamps))
+    if confidence is None:
+        confidence = (DEFAULT_MANUAL_CONFIDENCE if source in ("manual", "supabase")
+                      else DEFAULT_DISTILLED_CONFIDENCE)
     all_tags = list(tags_list or [])
     all_tags += [[] for _ in range(len(texts) - len(all_tags))]
     collection = get_collection()
@@ -415,7 +436,7 @@ def store_memories_batch(
             pending_ids.append(mem_id)
             pending_vectors.append(vector)
             pending_docs.append(_document(norm, tag_list))
-            pending_metas.append(_metadata(text, stamp or now, source, tag_list))
+            pending_metas.append(_metadata(text, stamp or now, source, tag_list, confidence))
         if pending_ids:
             collection.add(
                 ids=pending_ids,

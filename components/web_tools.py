@@ -15,7 +15,7 @@ import time
 import requests
 
 from .config import config
-from .engines import search_engine  # sibling module in the components package
+from .engines import search_engine, search_multi, _categorize_query, _AUTO_ENGINE_SETS
 from .scratch import save_to_scratch, read_scratch  # noqa: F401 (re-exported)
 
 # per-result snippet shown inline to the model
@@ -32,29 +32,39 @@ JINA_RETRY_ON_429 = config.get("web.jina_retry_on_429", 1)
 def search_web(query: str, engine: str = "duckduckgo", max_results: int = 5) -> str:
     """Run a search through engines.py and return a compact, context-cheap
     summary. Full result set (titles, urls, content snippets) is saved to
-    scratch for deep-diving via read_scratch. Automatically falls back to
-    alternate engines if the primary returns no results."""
-    max_results = min(int(max_results or 5), SEARCH_MAX_RESULTS)
-    engines_to_try = [engine] + [e for e in ["duckduckgo", "searxng", "bing", "google"] if e != engine]
-    results = None
-    used_engine = engine
-    last_error = None
-    for eng in engines_to_try:
-        try:
-            res = search_engine(eng, query, max_results=max_results)
-            if res:
-                results = res
-                used_engine = eng
-                break
-        except Exception as e:
-            if eng == engine:
-                last_error = e
-            continue
+    scratch for deep-diving via read_scratch.
 
-    if not results:
-        if last_error:
-            return f"search error ({engine}): {last_error}"
-        return f"no results found for: {query}"
+    Use ``engine="auto"`` to fan out to multiple engines (duckduckgo, wikipedia,
+    arxiv, etc.), deduplicate, and rank the merged results automatically.
+    """
+    max_results = min(int(max_results or 5), SEARCH_MAX_RESULTS)
+
+    if engine == "auto":
+        category = _categorize_query(query)
+        engines = _AUTO_ENGINE_SETS.get(category, ["duckduckgo"])
+        results = search_multi(query, engines=engines, max_results=max_results)
+        used_engine = f"auto ({category}, {', '.join(engines)})"
+    else:
+        engines_to_try = [engine] + [e for e in ["duckduckgo", "searxng", "bing", "google"] if e != engine]
+        results = None
+        used_engine = engine
+        last_error = None
+        for eng in engines_to_try:
+            try:
+                res = search_engine(eng, query, max_results=max_results)
+                if res:
+                    results = res
+                    used_engine = eng
+                    break
+            except Exception as e:
+                if eng == engine:
+                    last_error = e
+                continue
+
+        if not results:
+            if last_error:
+                return f"search error ({engine}): {last_error}"
+            return f"no results found for: {query}"
 
     sid = save_to_scratch(
         json.dumps(results, indent=2, ensure_ascii=False),
@@ -64,7 +74,9 @@ def search_web(query: str, engine: str = "duckduckgo", max_results: int = 5) -> 
     lines = [f"Search results for '{query}' via {used_engine} (full data at scratch:{sid}):"]
     for i, r in enumerate(results, 1):
         snippet = (r.get("content") or "")[:SEARCH_SNIPPET_CHARS].replace("\n", " ")
-        lines.append(f"{i}. {r.get('title', '(no title)')} — {r.get('url', '')}\n   {snippet}")
+        authority = r.get("_authority", 0.0)
+        authority_note = " [authoritative]" if authority > 0 else ""
+        lines.append(f"{i}. {r.get('title', '(no title)')} — {r.get('url', '')}{authority_note}\n   {snippet}")
     return "\n".join(lines)
 
 

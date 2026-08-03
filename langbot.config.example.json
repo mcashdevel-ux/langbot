@@ -5,7 +5,9 @@
     "base_url": "http://127.0.0.1:8080/v1",
     "model": "local-model",
     "temperature": 0.1,
-    "max_retries": 10
+    "max_retries": 10,
+    "_thinking_mode_comment": "\"auto\" lets the model decide; \"off\" appends /no_think to suppress reasoning blocks; \"on\" appends /think to explicitly request them. Only meaningful for Qwen3-family models.",
+    "thinking_mode": "auto"
   },
 
   "paths": {
@@ -40,6 +42,11 @@
     "lexical_search": true,
     "max_tags": 5,
     "auto_tags": true,
+    "_prune_comment": "Facts older than prune_age_days with confidence below prune_confidence_threshold are removed on startup. Only affects distilled (non-manual) facts. Set prune_age_days to 0 to disable.",
+    "prune_age_days": 90,
+    "prune_confidence_threshold": 0.8,
+    "default_manual_confidence": 1.0,
+    "default_distilled_confidence": 0.7,
     "non_distillable_tools": [
       "task_list", "task_status", "task_output", "task_kill", "task_start",
       "vault", "read_scratch", "glob_list"
@@ -76,7 +83,7 @@
 
   "context": {
     "budget_tokens": 32768,
-    "reserve_tokens": 8192,
+    "reserve_tokens": 2000,
     "compact_at": 0.7,
     "keep_last_messages": 12,
     "summary_max_chars": 1500,
@@ -89,6 +96,8 @@
     "manyfiles_inline_chars": 2000,
     "max_output_chars": 8000,
     "dynamic_binding": true,
+    "embedding_routing": true,
+    "embedding_threshold": 0.35,
     "core": [
       "execute_shell_command", "read_any_file", "write_any_file",
       "patch_file", "search_web", "recall"
