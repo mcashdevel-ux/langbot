@@ -10,10 +10,10 @@ holder (or, where assignment isn't permitted, licensed to it without restriction
 - **Tool coverage** — new agent tools in `components/` (each tool is a small, testable
   module; `langbot.py` only wires it up as a `@tool`). Anything returning potentially large
   output should go through `components/scratch.py` rather than into the model's context.
-- **Search engines** — extend `components/engines.py` with additional SearXNG engine
-  adapters, or improve result de-duplication and ranking.
-- **Memory quality** — better distillation prompts, fact de-duplication, and pruning in
-  `components/memory_store.py` / `components/memory_worker.py`.
+- **Search engines** *（PR #42: multi-engine search + URL dedup + authority scoring）* — more engine adapters and deeper ranking improvements still welcome.
+  See `components/engines.py` / `components/web_tools.py`.
+- **Memory quality** *（PR #42: improved distillation + confidence scoring + auto-pruning）* — further improvements welcome, especially staleness detection and recall-frequency-based re-ranking.
+  See `components/memory_store.py` / `components/memory_worker.py` / `housekeeping.py`.
 - **Model compatibility** — prompt and nudge tuning in `components/routing.py` for local
   models that stall, ask for permission, or emit tool calls as code blocks.
 - **Terminal UX** — `components/console.py` and `components/input.py` (rendering, streaming,
