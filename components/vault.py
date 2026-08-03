@@ -352,10 +352,13 @@ class VaultStore:
             return False
         if len(value) > CREDENTIAL_MAX_VALUE_LEN:
             return False
-        if len(self._credentials) >= MAX_CREDENTIALS:
-            return False
 
         with self._lock:
+            # Counted under the lock: read outside it, two concurrent writers could
+            # both see room for the last slot.
+            if (name not in self._credentials
+                    and len(self._credentials) >= MAX_CREDENTIALS):
+                return False
             blob = encrypt_value(self._master_key, value)
             self._credentials[name] = blob
 
@@ -571,13 +574,8 @@ class RedactionFilter:
         return text
 
     def get_masked_value(self, name: str) -> str:
-        """Return a masked version of a credential value for display."""
-        value = self._vault.get(name)
-        if value is None:
-            return ""
-        if len(value) <= 8:
-            return value[:2] + "****"
-        return value[:4] + "..." + value[-4:]
+        """Return a masked version of a stored credential, for display."""
+        return mask_value(self._vault.get(name) or "")
 
 
 # ---------------------------------------------------------------------------
@@ -912,10 +910,14 @@ def _vault_status() -> str:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _mask_value(value: str) -> str:
-    """Return a masked version of a value for safe display."""
+def mask_value(value: str) -> str:
+    """Return a masked version of a value for safe display.
+
+    The mask is a fixed width rather than one asterisk per hidden character: how
+    long a secret is narrows the search space for it, and nothing needs to know.
+    """
     if not value:
         return ""
     if len(value) <= 8:
-        return value[:2] + "*" * (len(value) - 2)
-    return value[:4] + "*" * (len(value) - 8) + value[-4:]
+        return value[:2] + "****"
+    return value[:4] + "..." + value[-4:]

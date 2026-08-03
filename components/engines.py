@@ -1,26 +1,29 @@
-"""SearXNG Engine Adapter — run SearXNG engines directly, no webapp needed.
+"""SearXNG engines, run directly — no SearXNG webapp, no HTTP hop.
 
-Loads any SearXNG engine module and calls request()/response() directly,
-using a plain ``requests`` HTTP stack. Supports the engines defined in the
-SearXNG settings.
+What SearXNG is worth here is its engine modules: one hand-maintained parser per
+search site. This loads those modules and calls their ``request()`` / ``response()``
+functions itself over a plain ``requests`` stack, so ``web_tools.search_web`` needs
+nothing running.
 
-Usage:
+That means the SearXNG source tree has to be importable. ``_ensure_searx_initialized``
+looks in ``web.searxng_source_dir``, then ``<repo>/searxng-src``, ``~/searxng-src``
+and ``/usr/local/searxng/searxng-src`` — and, unless ``web.searxng_auto_clone`` is
+turned off, clones it on the first search that needs it. That clone is a network
+fetch and tens of megabytes of disk on a code path that reads like a search, which is
+why it is configurable and logged at warning level.
+
     from components.engines import search_engine
 
-    # Simple interface
     results = search_engine("arxiv", "machine learning")
-    for r in results:
-        print(r["title"], r["url"])
-
-    # With options
     results = search_engine("google", "latest news", pageno=2, lang="en-US")
 """
 
 import sys
 import os
+import subprocess
+import threading
 import typing as t
 import logging
-from urllib.parse import urlencode
 
 import httpx
 import requests
@@ -32,10 +35,9 @@ from .config import config
 # ---------------------------------------------------------------------------
 
 _SEARX_INITIALIZED = False
-_ENGINE_CACHE: dict[str, t.Any] = {}
 _LOADED_ENGINES: dict[str, t.Any] = {}
 
-logger = logging.getLogger("sage.engines")
+logger = logging.getLogger(__name__)
 
 
 def _ensure_searx_initialized():
@@ -43,10 +45,10 @@ def _ensure_searx_initialized():
     if _SEARX_INITIALIZED:
         return
     
-    # Check several known locations for SearXNG source
-    _script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # This file is <repo>/components/engines.py, so the repo root is two levels up.
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     candidate_paths = [
-        os.path.join(_script_dir, "searxng-src"),
+        os.path.join(repo_root, "searxng-src"),
         os.path.expanduser("~/searxng-src"),
         "/usr/local/searxng/searxng-src",
     ]
@@ -60,9 +62,17 @@ def _ensure_searx_initialized():
             break
     
     if searx_src is None:
+        if not config.get("web.searxng_auto_clone", True):
+            raise RuntimeError(
+                "SearXNG source not found in " + ", ".join(candidate_paths)
+                + ", and web.searxng_auto_clone is off: clone "
+                "https://github.com/searxng/searxng into one of those paths, or point "
+                "web.searxng_source_dir at it."
+            )
         searx_src = os.path.expanduser("~/searxng-src")
-        import subprocess
-        logger.info("SearXNG source not found — cloning to %s", searx_src)
+        # Loud on purpose: a search has just become a network fetch and a lot of disk.
+        logger.warning("SearXNG source not found — cloning it to %s (one time; turn this "
+                       "off with web.searxng_auto_clone=false)", searx_src)
         try:
             subprocess.run(
                 ["git", "clone", "--depth", "1",
@@ -71,7 +81,7 @@ def _ensure_searx_initialized():
             )
             logger.info("SearXNG source cloned successfully")
         except Exception as e:
-            raise RuntimeError(f"Failed to clone SearXNG source: {e}")
+            raise RuntimeError(f"Failed to clone SearXNG source: {e}") from e
     
     if searx_src not in sys.path:
         sys.path.insert(0, searx_src)
@@ -151,11 +161,26 @@ class _HttpxResponseWrapper:
         return self._resp.json(**kwargs)
 
 
-def _make_http_request(params: dict) -> requests.Response:
-    """Execute the HTTP request built by an engine's request() function.
+_session: requests.Session | None = None
+_session_lock = threading.Lock()
 
-    Uses a ``requests.Session`` with a timeout and proper handling.
+
+def _get_session() -> requests.Session:
+    """The process-wide HTTP session.
+
+    Shared rather than created per request, so connections are actually pooled: one
+    search fans out over several engines and then follows up on the same hosts, where
+    a fresh session throws the TLS handshake away every time.
     """
+    global _session
+    with _session_lock:
+        if _session is None:
+            _session = requests.Session()
+        return _session
+
+
+def _make_http_request(params: dict) -> requests.Response:
+    """Execute the HTTP request an engine's ``request()`` built into ``params``."""
     method = params.get("method", "GET")
     url = params.get("url", "")
     headers = params.get("headers", {})
@@ -182,15 +207,10 @@ def _make_http_request(params: dict) -> requests.Response:
     elif content:
         req_kwargs["data"] = content
     
-    session = requests.Session()
-    try:
-        if method == "POST":
-            resp = session.post(url, **req_kwargs)
-        else:
-            resp = session.get(url, **req_kwargs)
-        return resp
-    finally:
-        session.close()
+    session = _get_session()
+    if method == "POST":
+        return session.post(url, **req_kwargs)
+    return session.get(url, **req_kwargs)
 
 
 # ---------------------------------------------------------------------------

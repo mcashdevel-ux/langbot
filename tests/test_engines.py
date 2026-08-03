@@ -174,52 +174,87 @@ class TestSearchEngine:
 # _make_http_request
 # ---------------------------------------------------------------------------
 
+class _FakeSession:
+    instances = 0
+
+    def __init__(self):
+        type(self).instances += 1
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append(("GET", url, kwargs))
+        return "resp"
+
+    def post(self, url, **kwargs):
+        self.calls.append(("POST", url, kwargs))
+        return "resp"
+
+
+@pytest.fixture
+def fake_session(monkeypatch):
+    """Replace the session factory and clear the cached session around each test."""
+    _FakeSession.instances = 0
+    monkeypatch.setattr(engines.requests, "Session", _FakeSession)
+    monkeypatch.setattr(engines, "_session", None)
+    return _FakeSession
+
+
 class TestMakeHttpRequest:
     def test_requires_url(self):
         with pytest.raises(ValueError, match="No URL"):
             engines._make_http_request({"url": ""})
 
-    def test_get_request(self, monkeypatch):
-        calls = {}
-
-        class FakeSession:
-            def get(self, url, **kwargs):
-                calls["method"] = "GET"
-                calls["url"] = url
-                return "resp"
-
-            def post(self, url, **kwargs):
-                calls["method"] = "POST"
-                return "resp"
-
-            def close(self):
-                calls["closed"] = True
-
-        monkeypatch.setattr(engines.requests, "Session", FakeSession)
+    def test_get_request(self, fake_session):
         engines._make_http_request({"url": "http://x", "method": "GET"})
-        assert calls["method"] == "GET"
-        assert calls["closed"] is True
+        assert engines._get_session().calls[0][:2] == ("GET", "http://x")
 
-    def test_post_request_with_data(self, monkeypatch):
-        calls = {}
-
-        class FakeSession:
-            def get(self, url, **kwargs):
-                calls["method"] = "GET"
-                return "resp"
-
-            def post(self, url, **kwargs):
-                calls["method"] = "POST"
-                calls["data"] = kwargs.get("data")
-                return "resp"
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr(engines.requests, "Session", FakeSession)
+    def test_post_request_with_data(self, fake_session):
         engines._make_http_request({"url": "http://x", "method": "POST", "data": {"k": "v"}})
-        assert calls["method"] == "POST"
-        assert calls["data"] == {"k": "v"}
+        method, url, kwargs = engines._get_session().calls[0]
+        assert (method, kwargs["data"]) == ("POST", {"k": "v"})
+
+    def test_the_session_is_shared_so_connections_pool(self, fake_session):
+        engines._make_http_request({"url": "http://x", "method": "GET"})
+        engines._make_http_request({"url": "http://y", "method": "GET"})
+        assert fake_session.instances == 1
+        assert len(engines._get_session().calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# Locating the SearXNG source
+# ---------------------------------------------------------------------------
+
+class TestSearxSourceLookup:
+    def test_auto_clone_off_reports_where_it_looked(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(engines, "_SEARX_INITIALIZED", False)
+        monkeypatch.setattr(engines.config, "get", lambda key, default=None, **kw: {
+            "web.searxng_source_dir": str(tmp_path / "nowhere"),
+            "web.searxng_auto_clone": False,
+        }.get(key, default))
+
+        def no_clone(*args, **kwargs):  # pragma: no cover - must not be reached
+            raise AssertionError("cloned despite web.searxng_auto_clone=false")
+
+        monkeypatch.setattr(engines.subprocess, "run", no_clone)
+        with pytest.raises(RuntimeError, match="searxng_auto_clone") as excinfo:
+            engines._ensure_searx_initialized()
+        assert str(tmp_path / "nowhere") in str(excinfo.value)
+
+    def test_a_configured_source_dir_is_preferred(self, monkeypatch, tmp_path):
+        src = tmp_path / "searxng-src"
+        (src / "searx").mkdir(parents=True)
+        # Bootstrapping mutates both of these; copies keep it inside the test.
+        monkeypatch.setattr(sys, "path", list(sys.path))
+        monkeypatch.setenv("SEARXNG_SETTINGS_PATH", "")
+        monkeypatch.setattr(engines, "_SEARX_INITIALIZED", False)
+        monkeypatch.setattr(engines.config, "get", lambda key, default=None, **kw: (
+            str(src) if key == "web.searxng_source_dir" else default))
+        monkeypatch.setattr(engines.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("cloned despite a usable source dir")))
+        monkeypatch.setitem(sys.modules, "searx", types.ModuleType("searx"))
+        engines._ensure_searx_initialized()
+        assert str(src) in sys.path
+        assert engines._SEARX_INITIALIZED
 
 
 # ---------------------------------------------------------------------------
