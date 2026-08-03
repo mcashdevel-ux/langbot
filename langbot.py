@@ -78,7 +78,7 @@ from components import (
 from components import context_budget as _ctx
 from components.tool_router import select_tools as _select_tools
 from components.routing import RECURSION_LIMIT, is_nudge, nudge_agent, route_agent
-from components.tool_call_repair import repair_message
+from components.tool_call_repair import repair_message, stats as _repair_stats
 
 import components.console as ui
 from components.input import read_input, setup_readline
@@ -738,6 +738,11 @@ def _handle_slash(text: str, config: dict) -> bool:
         ui.kv("memories", str(_memory_count()))
         ui.kv("memory queue depth", str(_memory_worker.qsize()))
         ui.kv("memory jobs dropped", str(_memory_worker.dropped_count()))
+        # Non-zero recovered calls means the server is not constraining tool-call
+        # decoding (start llama-server with --jinja); see README.
+        _repairs = _repair_stats()
+        ui.kv("tool-call repairs", f"{_repairs['recovered_calls']} recovered, "
+                                   f"{_repairs['cleaned_answers']} answers cleaned")
         ui.kv("distillation", _distill_llm.describe())
         ui.kv("warmup", _warmup.summary())
         ui.kv("vault creds", str(len(_VAULT_ENV_LOADED)))

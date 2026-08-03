@@ -175,6 +175,10 @@ dropped to 3 and the nudge texts are one line each.
 ## Remaining suggested priorities
 1. Constrain tool-call decoding at the server (GBNF grammar / the model's own chat
   template) so `tool_call_repair` stops being the only defence against malformed calls.
+  The change itself is on the server side (`llama-server --jinja`), outside this repo;
+  `/health`'s `tool-call repairs` counters (`tool_call_repair.stats()`) are how you tell
+  whether it took effect — a session that stays at `0 recovered` is the evidence that
+  this is done, and that the repair/nudge layers can start shrinking.
 2. Reclaim disk: prune scratch entries (L13) and abandoned checkpoint threads (L14).
 3. Consider password-by-default or a clearer at-rest warning for the vault (C3 remaining).
 4. Tidy the remaining engines/vault nits (L4, L5, L7–L9).
