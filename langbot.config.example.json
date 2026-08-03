@@ -102,7 +102,8 @@
     "jina_timeout": 25,
     "jina_retry_on_429": 1,
     "searxng_settings_path": "/etc/searxng/settings.yml",
-    "searxng_source_dir": ""
+    "searxng_source_dir": "",
+    "searxng_auto_clone": true
   },
 
   "routing": {

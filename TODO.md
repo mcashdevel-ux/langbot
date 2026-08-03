@@ -8,10 +8,6 @@ decision, or neither.
 
 ## Needs neither — config and logic only
 
-- [ ] **Nits: L4, L5, L7 (`engines.py`), L8, L9 (`vault.py`).** Implicit `git clone` side
-      effect and stale docstrings from another project; a fresh `requests.Session()` per
-      request; a `MAX_CREDENTIALS` length check read outside the lock; two masking helpers
-      where one is unused. Batchable into one cleanup PR.
 - [ ] **Task-based eval harness.** 10–15 scripted REPL tasks run after each merge. Unit tests
       confirm each part does what it is told in isolation; only this shows whether compaction
       and tool routing are net-positive *together*. Biggest lift here, and the thing that
@@ -61,3 +57,4 @@ decision, or neither.
 | #36 | Start-up disk sweep: old scratch entries, abandoned checkpoint threads | `housekeeping.py` |
 | #38 | Stagnation guard: a call repeated verbatim in a turn is not re-run | `routing.py` |
 | #39 | Prompt composition and prompt-cache cost of compaction, in `/health` | `context_budget.py` |
+| #41 | Nits L4, L5, L7, L8, L9 — explicit SearXNG clone, pooled session, vault masking | `engines.py`, `vault.py` |
