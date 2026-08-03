@@ -122,3 +122,81 @@ class TestCompact:
         assert dropped == []
         assert recent == msgs
         assert summary == ""
+
+
+class TestInstrumentation:
+    def setup_method(self):
+        ctx.reset_stats()
+
+    def teardown_method(self):
+        ctx.reset_stats()
+
+    def test_no_steps_yet_is_said_plainly(self):
+        assert ctx.stats_summary() == "no agent steps yet"
+
+    def test_peaks_are_peaks_not_last_values(self):
+        ctx.record_step(history_tokens=9000, overhead_tokens=1200, schema_tokens=800)
+        ctx.record_step(history_tokens=100, overhead_tokens=900, schema_tokens=500)
+        stats = ctx.stats()
+        assert stats["steps"] == 2
+        assert stats["peak_history"] == 9000
+        assert stats["peak_overhead"] == 1200
+        assert stats["peak_schemas"] == 800
+        assert stats["peak_prompt"] == 10200
+
+    def test_reuse_is_reported_as_a_share_of_the_prompt(self):
+        # Half of a 1000-token prompt reused, then none of the next one.
+        ctx.record_step(history_tokens=900, overhead_tokens=100, prefix_tokens=500)
+        ctx.record_step(history_tokens=900, overhead_tokens=100, prefix_tokens=0)
+        stats = ctx.stats()
+        assert stats["prefix_reused"] == 500
+        assert stats["prefix_reprocessed"] == 1500
+        assert "cache reuse 25%" in ctx.stats_summary()
+
+    def test_a_prefix_larger_than_the_prompt_cannot_inflate_reuse(self):
+        ctx.record_step(history_tokens=10, overhead_tokens=10, prefix_tokens=999)
+        assert ctx.stats()["prefix_reused"] == 20
+        assert ctx.stats()["prefix_reprocessed"] == 0
+
+    def test_compactions_are_counted_with_what_they_dropped(self):
+        ctx.record_compaction(7, 4200)
+        ctx.record_compaction(2, 800)
+        stats = ctx.stats()
+        assert stats["compactions"] == 2
+        assert stats["tokens_dropped"] == 5000
+
+    def test_summary_names_the_reserve_it_is_judged_against(self):
+        ctx.record_step(history_tokens=1000, overhead_tokens=2000, schema_tokens=1500)
+        summary = ctx.stats_summary()
+        assert f"of reserve {ctx.RESERVE_TOKENS}" in summary
+        assert "schemas 1500" in summary
+
+
+class TestSharedPrefixTokens:
+    def test_an_identical_prompt_is_fully_reusable(self):
+        rendered = ["system:prompt", "human:hello", "ai:hi"]
+        assert ctx.shared_prefix_tokens(rendered, rendered) == sum(
+            ctx.estimate_tokens(m) for m in rendered
+        )
+
+    def test_appending_keeps_the_whole_previous_prefix(self):
+        before = ["system:prompt", "human:hello"]
+        after = ["system:prompt", "human:hello", "ai:hi"]
+        assert ctx.shared_prefix_tokens(before, after) == ctx.shared_prefix_tokens(
+            before, before
+        )
+
+    def test_a_changed_lead_invalidates_everything_after_it(self):
+        # This is what compaction does: the summary lives in the system message, so
+        # rewriting it means the server reuses nothing.
+        before = ["system:prompt", "human:hello", "ai:hi"]
+        after = ["system:prompt\n\nEarlier in this session:...", "human:hello", "ai:hi"]
+        assert ctx.shared_prefix_tokens(before, after) == 0
+
+    def test_a_change_in_the_middle_keeps_the_lead(self):
+        before = ["system:p", "human:a", "ai:x"]
+        after = ["system:p", "human:b", "ai:x"]
+        assert ctx.shared_prefix_tokens(before, after) == ctx.estimate_tokens("system:p")
+
+    def test_no_previous_prompt_means_no_reuse(self):
+        assert ctx.shared_prefix_tokens([], ["system:p"]) == 0

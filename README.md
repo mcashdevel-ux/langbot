@@ -182,6 +182,25 @@ Counting uses `tiktoken` when installed and a `chars_per_token` estimate otherwi
 Set `budget_tokens` to the context length the server is actually serving (`llama-server
 -c`), not the model's theoretical maximum.
 
+`/health` reports what the budget is actually spending, so `reserve_tokens` stops being a
+guess:
+
+```
+context   14 steps, peak prompt 9310 tokens (history 8004, overhead 1306 of reserve 8192,
+          schemas 956), cache reuse 41%, 2 compactions dropping 5100 tokens
+```
+
+- **overhead** is the system prompt + rolling summary + bound tool schemas — everything
+  `reserve_tokens` is meant to cover apart from the answer being generated. On this repo's
+  tool set that is ~1.2K (schemas ~950 for the 6–8 tools a turn binds, ~2.2K if all 20 were
+  bound), so a 8192 reserve is mostly headroom for generation.
+- **cache reuse** is the share of prompt tokens a prefix-caching server could keep from the
+  previous step. Compaction rewrites the leading system message (the summary lives inside
+  it, because a second system message is rejected), so the step after a compaction reuses
+  nothing and reprocesses the window — the cost to weigh against the tokens it freed.
+
+Run `LANGBOT_LOG_LEVEL=DEBUG` for the same breakdown per step in the log.
+
 ### Stagnation guard
 
 A model that has lost the thread re-issues a call it already made, verbatim, and every
