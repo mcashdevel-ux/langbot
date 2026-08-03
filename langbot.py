@@ -78,7 +78,13 @@ from components import (
 from components import context_budget as _ctx
 from components import housekeeping as _housekeeping
 from components.tool_router import select_tools as _select_tools
-from components.routing import RECURSION_LIMIT, is_nudge, nudge_agent, route_agent
+from components.routing import (
+    RECURSION_LIMIT,
+    is_nudge,
+    nudge_agent,
+    route_agent,
+    split_repeated_calls,
+)
 from components.tool_call_repair import repair_message, stats as _repair_stats
 
 import components.console as ui
@@ -547,13 +553,32 @@ _tool_node = ToolNode(tools)
 
 def tools_node(state: AgentState):
     """Run tools, then scrub any stored credential values from their output
-    before it re-enters the model's context (see vault.redact)."""
-    result = _tool_node.invoke(state)
+    before it re-enters the model's context (see vault.redact).
+
+    A call the model already made verbatim this turn is answered from the transcript
+    instead of executed (``routing.split_repeated_calls``) — where a stuck loop stops
+    costing shell commands and fetches. Blocked calls still get a ToolMessage, so
+    every call in the assistant message is answered and the next request stays valid.
+    """
+    messages = state["messages"]
+    to_run, blocked = split_repeated_calls(messages)
+    if not blocked:
+        result = _tool_node.invoke(state)
+    elif not to_run:
+        result = {"messages": []}
+    else:
+        # The tool node sees a copy of the message carrying only the calls to run; the
+        # original stays in state, so call ids still line up with the replies.
+        trimmed = messages[-1].model_copy(update={"tool_calls": to_run})
+        result = _tool_node.invoke({**state, "messages": list(messages[:-1]) + [trimmed]})
+
     for msg in result.get("messages", []):
         # Skip the vault tool itself — 'get' is meant to return the value.
         if getattr(msg, "type", None) == "tool" and getattr(msg, "name", None) != "vault" \
                 and isinstance(getattr(msg, "content", None), str):
             msg.content = _vault_redact(msg.content)
+    if blocked:
+        result = {**result, "messages": list(result.get("messages", [])) + blocked}
     return result
 
 builder = StateGraph(AgentState)

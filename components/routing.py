@@ -5,6 +5,8 @@ unit-tested against synthetic message lists:
 
 - ``route_agent``  — decides whether the graph goes to tools, a nudge, or distill.
 - ``nudge_agent``  — builds the corrective message for a detected failure.
+- ``split_repeated_calls`` — stops a tool call the model already made this turn from
+  running again (see the stagnation guard below).
 - failure-mode phrase/pattern tables used by both.
 
 A nudge is delivered as a ``HumanMessage``, not a ``SystemMessage``: many served
@@ -14,9 +16,10 @@ mid-conversation by definition. It carries ``NUDGE_MARKER`` so the counters belo
 can still tell nudges apart from what the user actually typed.
 """
 
+import json
 import logging
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 
 from .config import config
 
@@ -83,6 +86,24 @@ NUDGE_CODE_BLOCK = (
     "Call the tool through the function-calling interface now."
 )
 
+# Stagnation guard: a small model that has lost the thread often re-issues a call it
+# already made, verbatim, and each repeat costs a full re-send of the window plus
+# whatever the tool does (a shell command, a fetch). Repeats are answered from the
+# transcript instead of executed.
+#
+# Some tools are *meant* to be called with identical arguments repeatedly, because
+# their answer changes over time: polling a background task is progress, not a loop.
+STAGNATION_GUARD = config.get("routing.stagnation_guard", True)
+STAGNATION_EXEMPT_TOOLS = set(config.get(
+    "routing.stagnation_exempt_tools",
+    ["task_status", "task_output", "task_list"],
+))
+
+REPEATED_CALL_NOTICE = (
+    "This exact call was already made in this turn and was not run again. Its result "
+    "is already above — use it, call with different arguments, or answer the user."
+)
+
 
 def is_nudge(message) -> bool:
     """True for a message this module injected, rather than one the user sent."""
@@ -130,6 +151,62 @@ def final_answers_since_human(messages) -> int:
         if getattr(m, "type", None) == "ai" and not (getattr(m, "tool_calls", None) or []):
             count += 1
     return count
+
+
+def _call_signature(call) -> str:
+    """Identity of a tool call: its name plus its arguments, key order ignored."""
+    name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
+    args = call.get("args") if isinstance(call, dict) else getattr(call, "args", None)
+    try:
+        rendered = json.dumps(args, sort_keys=True, default=str)
+    except (TypeError, ValueError):        # unhashable/unserialisable args: not a repeat
+        rendered = repr(args)
+    return f"{name}({rendered})"
+
+
+def _calls_this_turn(messages) -> set:
+    """Signatures of every tool call made since the last real user message."""
+    seen = set()
+    for m in reversed(messages):
+        if _turn_start(m):
+            break
+        for call in getattr(m, "tool_calls", None) or []:
+            seen.add(_call_signature(call))
+    return seen
+
+
+def split_repeated_calls(messages) -> tuple:
+    """Split the last AI message's tool calls into those to run and canned replies.
+
+    Returns ``(calls_to_run, tool_messages)``. Every blocked call still gets a
+    ``ToolMessage`` carrying its ``tool_call_id``: an assistant message whose calls
+    are left unanswered is invalid for the next request, so refusing to answer one
+    would break the session rather than the loop.
+    """
+    last_msg = messages[-1]
+    calls = list(getattr(last_msg, "tool_calls", None) or [])
+    if not STAGNATION_GUARD or not calls:
+        return calls, []
+
+    earlier = _calls_this_turn(messages[:-1])
+    to_run, blocked, seen_here = [], [], set()
+    for call in calls:
+        name = call.get("name")
+        signature = _call_signature(call)
+        # A duplicate inside one message is a repeat too, exempt tools aside.
+        repeat = signature in earlier or signature in seen_here
+        seen_here.add(signature)
+        if repeat and name not in STAGNATION_EXEMPT_TOOLS:
+            logger.warning("stagnation guard: refused a repeated call to %s", signature)
+            blocked.append(ToolMessage(
+                content=REPEATED_CALL_NOTICE,
+                name=name,
+                tool_call_id=call.get("id") or "",
+                status="error",
+            ))
+        else:
+            to_run.append(call)
+    return to_run, blocked
 
 
 def nudge_agent(state):
