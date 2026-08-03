@@ -72,7 +72,7 @@ from components import (
     scratch as _scratch,
     web_tools as _web_tools,
 )
-from components.routing import nudge_agent, route_agent
+from components.routing import RECURSION_LIMIT, nudge_agent, route_agent
 from components.tool_call_repair import repair_message
 
 import components.console as ui
@@ -738,7 +738,10 @@ def main() -> None:
                    "will not persist.")
     ui.startup_tip(LLM_MODEL)
     session_id = f"session_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
-    config = {"configurable": {"thread_id": session_id}}
+    config = {
+        "configurable": {"thread_id": session_id},
+        "recursion_limit": RECURSION_LIMIT,
+    }
 
     try:
         if SQLITE_AVAILABLE:
