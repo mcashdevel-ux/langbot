@@ -39,8 +39,8 @@ output redaction, and the REPL uses the readline input + console UI.
 | M4 | Medium | components/memory_store.py | `n_results=0` passed to Chroma on empty memory | ✅ Fixed |
 | M5 | Medium | components/vault.py | Vault/input/console not integrated with the agent | ✅ Fixed (#8/#9) |
 | M6 | Medium | langbot.py | Unrestricted shell/file tools, no sandbox | ⚙️ By design |
-| M7 | Medium | langbot.py | Thread history grows unbounded; every turn resends all of it | ⬜ Open |
-| M8 | Medium | components/routing.py | Nudge budget is spent by tool rounds, disabling nudges mid-task | ⬜ Open |
+| M7 | Medium | langbot.py | Thread history grows unbounded; every turn resends all of it | ✅ Fixed |
+| M8 | Medium | components/routing.py | Nudge budget is spent by tool rounds, disabling nudges mid-task | ✅ Fixed |
 | L1–L14 | Low | various | See below | mixed |
 
 ---
@@ -117,26 +117,19 @@ combined with a system prompt telling the model to act without asking, are inten
 called out by the startup banner and the README security section. If ever exposed beyond a
 trusted single-user terminal, add an allowlist / path jail / confirmation gate.
 
-### M7. No context management: the thread grows without bound — ⬜ Open
-`agent()` sends `[system_prompt] + state["messages"]` on every step, and `SqliteSaver`
-keeps the whole thread under one `thread_id`, so every past tool result is resent for the
-rest of the session. There is no `trim_messages`, no summarization, and no token
-accounting anywhere; the only levers are per-message (scratch offload keeps individual
-results small) and manual (`/new` starts a fresh thread). A long session therefore ends in
-the LLM server's own context error — which is what the "context parse error (500) → try
-/new" branch in `run_repl` is papering over.
-**Fix:** trim or summarize before `agent()` — keep the system prompt and the last N turns
-verbatim and roll older messages into a running summary; tool results already carry
-`scratch:` ids, so the detail stays retrievable after compaction.
+### M7. No context management: the thread grew without bound — ✅ Fixed
+A `compact` node (`components/context_budget.py`) now runs before every agent step: once
+the thread plus its rolling summary crosses `context.compact_at` of the usable budget,
+everything older than `keep_last_messages` is folded into the summary by one cheap LLM
+call and removed from the checkpoint with `RemoveMessage`, so the thread shrinks on disk
+as well as in the prompt. Budgets are counted in tokens (`tiktoken` when available), the
+split never orphans a tool result from its call, and a summarizer failure leaves the turn
+uncompacted rather than losing it.
 
-### M8. The nudge budget is spent by tool rounds — ⬜ Open
-`route_agent` gates nudging on `ai_turns_since_human(messages) < MAX_NUDGES_PER_TURN`, but
-`ai_turns_since_human` counts *every* AI message since the last human one, including
-tool-calling ones. On any turn with 5+ tool rounds the budget is exhausted by ordinary
-work, so the permission/code-block guardrails silently stop firing exactly on the long
-autonomous tasks they exist for.
-**Fix:** count nudges actually issued this turn (e.g. `SystemMessage`s carrying the
-`[AUTONOMOUS AGENT DIRECTIVE]` marker) instead of AI turns.
+### M8. The nudge budget was spent by tool rounds — ✅ Fixed
+`route_agent` now gates on `nudges_since_human`, which counts only messages carrying
+`NUDGE_MARKER`, so ordinary tool rounds no longer exhaust the budget. The budget itself
+dropped to 3 and the nudge texts are one line each.
 
 ---
 
@@ -180,9 +173,8 @@ autonomous tasks they exist for.
 ---
 
 ## Remaining suggested priorities
-1. Add context management before the thread outgrows the model's window (M7) — the only
-  finding that makes long sessions fail outright.
-2. Count nudges rather than AI turns so the autonomy guardrails survive tool-heavy turns (M8).
-3. Reclaim disk: prune scratch entries (L13) and abandoned checkpoint threads (L14).
-4. Consider password-by-default or a clearer at-rest warning for the vault (C3 remaining).
-5. Tidy the remaining engines/vault nits (L4, L5, L7–L9).
+1. Constrain tool-call decoding at the server (GBNF grammar / the model's own chat
+  template) so `tool_call_repair` stops being the only defence against malformed calls.
+2. Reclaim disk: prune scratch entries (L13) and abandoned checkpoint threads (L14).
+3. Consider password-by-default or a clearer at-rest warning for the vault (C3 remaining).
+4. Tidy the remaining engines/vault nits (L4, L5, L7–L9).
