@@ -113,5 +113,12 @@
   "compat": {
     "repair_json_tool_calls": true,
     "repair_max_candidates": 20
+  },
+
+  "housekeeping": {
+    "enabled": true,
+    "scratch_max_age_days": 7,
+    "scratch_max_total_mb": 512,
+    "checkpoint_keep_threads": 20
   }
 }

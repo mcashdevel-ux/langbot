@@ -55,6 +55,19 @@ The checkpoint DB is config-only (`paths.checkpoint_db`, default
 All new dynamic paths should be configurable via the config file (and an environment
 variable where a per-run override is useful) with defaults in `./memory/`.
 
+## Retention
+
+State under `./memory/` is allowed to be deleted, and two paths are swept once per start by
+`components/housekeeping.py` (see the README's *Disk housekeeping* section for the knobs):
+
+| Path | Kept |
+|------|------|
+| `./memory/agent_scratch/` | entries newer than `housekeeping.scratch_max_age_days`, then newest-first until the directory fits `scratch_max_total_mb` |
+| `./memory/agent_checkpoints.db` | the active thread plus the `housekeeping.checkpoint_keep_threads` most recent ones |
+
+Long-term memory (`./memory/agent_memory_chroma/`) and the vault (`./memory/vault/`) are
+never swept: they hold what the user asked to keep.
+
 ## Future Changes
 
 When adding new persistent state:

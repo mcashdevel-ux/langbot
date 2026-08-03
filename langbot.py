@@ -76,6 +76,7 @@ from components import (
     web_tools as _web_tools,
 )
 from components import context_budget as _ctx
+from components import housekeeping as _housekeeping
 from components.tool_router import select_tools as _select_tools
 from components.routing import RECURSION_LIMIT, is_nudge, nudge_agent, route_agent
 from components.tool_call_repair import repair_message, stats as _repair_stats
@@ -120,7 +121,22 @@ llm = ChatOpenAI(
 # on a background thread from main() so the REPL is usable immediately; the memory
 # tools do not consult this, since memory_store loads on first use under its own
 # lock either way (see components/warmup.py).
+# The start-up disk sweep rides along here for the same reason: it must not be on
+# the interactive loop, and it is the only other thing that wants to run once per
+# start. It goes first so it is done before the checkpointer is busy.
+_active_thread_id = None
+_sweep_summary = "pending"
+
+
+def _sweep_disk() -> None:
+    global _sweep_summary
+    _sweep_summary = _housekeeping.sweep(
+        _scratch.SCRATCH_DIR, SQLITE_DB_PATH, _active_thread_id
+    )
+
+
 _warmup = Warmup({
+    "housekeeping": _sweep_disk,
     "embeddings": lambda: _load_embeddings(announce=False),
     "memory store": _memory_collection,
 })
@@ -745,6 +761,7 @@ def _handle_slash(text: str, config: dict) -> bool:
                                    f"{_repairs['cleaned_answers']} answers cleaned")
         ui.kv("distillation", _distill_llm.describe())
         ui.kv("warmup", _warmup.summary())
+        ui.kv("disk freed at start", _sweep_summary)
         ui.kv("vault creds", str(len(_VAULT_ENV_LOADED)))
         ui.kv("bg tasks", str(len(_tasks.manager.list())))
         ui.kv("log file", str(_log_path() or "(stderr)"))
@@ -851,8 +868,12 @@ def main() -> None:
         ui.warning("langgraph-checkpoint-sqlite is not installed — conversation history "
                    "will not persist.")
     ui.startup_tip(LLM_MODEL)
-    _warmup.start()
     session_id = f"session_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    # Set before the sweep runs, so this session's checkpoint rows are never the
+    # ones it prunes.
+    global _active_thread_id
+    _active_thread_id = session_id
+    _warmup.start()
     config = {
         "configurable": {"thread_id": session_id},
         "recursion_limit": RECURSION_LIMIT,
