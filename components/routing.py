@@ -56,6 +56,12 @@ TOOL_AVOIDANCE_PATTERNS = (
 # Nudge re-tries allowed per human turn before the loop gives up and finalizes.
 MAX_NUDGES_PER_TURN = config.get("routing.max_nudges_per_turn", 5)
 
+# Graph super-steps allowed per human turn. One tool round costs two steps
+# (agent -> tools -> agent), so 100 leaves room for ~48 tool rounds before
+# langgraph raises GraphRecursionError; its own default of 25 caps a turn at
+# roughly a dozen tool calls, which a research or build task exhausts easily.
+RECURSION_LIMIT = config.get("routing.recursion_limit", 100)
+
 NUDGE_PERMISSION = (
     "[AUTONOMOUS AGENT DIRECTIVE]: You just asked for permission or confirmation instead of acting. "
     "Do NOT ask the user whether to proceed. "

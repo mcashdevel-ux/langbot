@@ -62,7 +62,8 @@
   },
 
   "routing": {
-    "max_nudges_per_turn": 5
+    "max_nudges_per_turn": 5,
+    "recursion_limit": 100
   },
 
   "compat": {
