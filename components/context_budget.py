@@ -214,6 +214,8 @@ def record_step(history_tokens: int, overhead_tokens: int, schema_tokens: int = 
                 prefix_tokens: int = 0) -> None:
     """Record one agent step's prompt composition."""
     prompt = history_tokens + overhead_tokens
+    global _last_prompt_tokens
+    _last_prompt_tokens = prompt
     with _stats_lock:
         _stats["steps"] += 1
         _stats["peak_prompt"] = max(_stats["peak_prompt"], prompt)
@@ -253,6 +255,18 @@ def reset_stats() -> None:
     with _stats_lock:
         for key in _stats:
             _stats[key] = 0
+
+
+# Current prompt size, updated by each record_step() call, so the REPL
+# prompt can show a live context-usage bar.
+_last_prompt_tokens: int = 0
+
+
+def usage_fraction() -> float:
+    """Return the last recorded prompt size as a fraction of the compaction threshold."""
+    if not _last_prompt_tokens:
+        return 0.0
+    return min(1.0, _last_prompt_tokens / max(1, compaction_threshold()))
 
 
 def count_thinking_tokens(text: str) -> int:

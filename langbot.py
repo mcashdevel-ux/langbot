@@ -913,7 +913,9 @@ def run_repl(app, config):
     """
     while True:
         try:
-            user_input = read_input("\nYou: ")
+            ctx_bar = ui.context_usage_bar()
+            prompt_line = f"\nYou: {ctx_bar}  " if ctx_bar else "\nYou: "
+            user_input = read_input(prompt_line)
         except (KeyboardInterrupt, EOFError):
             ui.info("Session closing...")
             break
