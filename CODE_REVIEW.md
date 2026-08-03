@@ -11,19 +11,37 @@ requests to review. Several findings have since been addressed in follow-up PRs:
 - **later PRs (through #25)** — split the tools into their own modules, added the
   optional config file, the on-disk scratchpad, the background memory worker and
   tagged/lexical memory search, the tool-call repair layer, and a 465-test suite.
-  These closed M2, M4, L2, L3, L6, L11 and L12; the statuses below were re-verified
-  against `main` at `433c331`.
+  These closed M2, M4, L2, L3, L6, L11 and L12.
+- **#27** — fit the agent to a 32K window and a 9B model: token-budgeted history
+  compaction (`context_budget`), per-turn tool binding (`tool_router`), background
+  warmup (`warmup`), and the nudge-budget fix. Closed M7 and M8.
+- **#30, #31** — distillation on a rate-limit-aware tier chain with the local model last
+  (`fallback_llm`), then a swap of the two Groq models deprecated 2026-08-16.
+- **#32** — nudges and the rolling summary no longer send a mid-list system message (M9).
+- **#33** — `tool_call_repair.stats()`, surfaced by `/health`, so priority 1 below has a
+  completion signal.
+- **#36** — the start-up disk sweep (`housekeeping`). Closed L13 and L14.
 
-Statuses below reflect the **current** `main`. Legend: ✅ fixed · ⚠️ partially
-addressed / mitigated · ⬜ open · ⚙️ intentional by design.
+Statuses below reflect the **current** `main`, re-verified at `4c993e0` with a 556-test
+suite. Legend: ✅ fixed · ⚠️ partially addressed / mitigated · ⬜ open · ⚙️ intentional
+by design.
 
 **Repo shape (current):** `langbot.py` (root) is the LangGraph/LangChain entrypoint and
 holds only the tool wiring, the graph, and the REPL. Everything else lives in
-`components/`: `web_tools`, `engines`, `scratch`, `file_ops`, `code_search`, `tasks`,
-`memory_store`, `memory_worker`, `supabase_sync`, `routing`, `tool_call_repair`, `config`,
-`logging_setup`, `vault`, `input`, `console`, `utils`. `vault`/`input`/`console` are no
-longer orphaned — the vault is exposed as the `vault` tool with startup env auto-load and
-output redaction, and the REPL uses the readline input + console UI.
+`components/`:
+
+| Area | Modules |
+|------|---------|
+| Tools | `file_ops`, `code_search`, `tasks`, `web_tools`, `engines`, `scratch`, `vault` |
+| Memory | `memory_store`, `memory_worker`, `fallback_llm`, `supabase_sync` |
+| Prompt economy | `context_budget` (history compaction), `tool_router` (per-turn tool binding) |
+| Agent-loop guards | `routing` (nudges, duplicate answers), `tool_call_repair` |
+| Lifecycle | `warmup` (background init), `housekeeping` (start-up disk sweep) |
+| Plumbing | `config`, `logging_setup`, `input`, `console`, `utils` |
+
+`vault`/`input`/`console` are no longer orphaned — the vault is exposed as the `vault` tool
+with startup env auto-load and output redaction, and the REPL uses the readline input +
+console UI.
 
 ## Summary
 
@@ -41,6 +59,8 @@ output redaction, and the REPL uses the readline input + console UI.
 | M6 | Medium | langbot.py | Unrestricted shell/file tools, no sandbox | ⚙️ By design |
 | M7 | Medium | langbot.py | Thread history grows unbounded; every turn resends all of it | ✅ Fixed |
 | M8 | Medium | components/routing.py | Nudge budget is spent by tool rounds, disabling nudges mid-task | ✅ Fixed |
+| M9 | Medium | components/routing.py, langbot.py | Nudges/summary sent as non-leading system messages → server 500 ends the session | ✅ Fixed (#32) |
+| M10 | Medium | components/fallback_llm.py | Distillation tiers pinned to models Groq shuts down 2026-08-16 | ✅ Fixed (#31) |
 | L1–L14 | Low | various | See below | mixed |
 
 ---
@@ -131,6 +151,21 @@ uncompacted rather than losing it.
 `NUDGE_MARKER`, so ordinary tool rounds no longer exhaust the budget. The budget itself
 dropped to 3 and the nudge texts are one line each.
 
+### M9. Non-leading system messages ended the session with a 500 — ✅ Fixed (#32)
+`nudge_agent` appended a `SystemMessage` to the end of the thread, and `agent()` sent the
+rolling summary as a second one; served chat templates reject any system message that is not
+first (llama.cpp: *"System message must be at the beginning"*), so the next step 500'd and
+the turn died. Nudges are now `HumanMessage`s carrying `NUDGE_MARKER`, and the summary is
+folded into the single leading system prompt. The counters (and `distill_knowledge`) skip
+nudges via `routing.is_nudge`, so a nudge no longer reads as the user speaking.
+
+### M10. Distillation tiers pinned to models Groq is shutting down — ✅ Fixed (#31)
+`llama-3.3-70b-versatile` and `llama-3.1-8b-instant` held the first and last hosted slots;
+Groq deprecated both on 2026-06-17 with shutdown on 2026-08-16, after which every call to
+them would fail and quietly push distillation onto the local model. The chain now follows
+Groq's migration guidance: `openai/gpt-oss-120b` → `qwen/qwen3.6-27b` → `openai/gpt-oss-20b`
+→ local. Worth re-checking whenever Groq's deprecation page moves.
+
 ---
 
 ## Low / Nits
@@ -161,7 +196,7 @@ dropped to 3 and the nudge texts are one line each.
   advertised commands (`/help`, `/quit`, `/new`, `/info`, `/health`, `/config`, `/ls`,
   `/knowledge`, `/save`).
 - **L12 (general):** ✅ Fixed — `requirements.txt`, `requirements-dev.txt` and a
-  `pyproject.toml` with `requires-python = ">=3.10"` now exist alongside a 465-test suite.
+  `pyproject.toml` with `requires-python = ">=3.10"` now exist alongside a 556-test suite.
 - **L13 (components/scratch.py):** ✅ Fixed — `components/housekeeping.py` sweeps
   `paths.scratch_dir` once per start on the warmup thread: entries older than
   `housekeeping.scratch_max_age_days` (7) go, then oldest-first until the directory fits
