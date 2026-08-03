@@ -4,13 +4,19 @@ Pure message-list logic, deliberately free of langgraph/LLM imports so it can be
 unit-tested against synthetic message lists:
 
 - ``route_agent``  — decides whether the graph goes to tools, a nudge, or distill.
-- ``nudge_agent``  — builds the corrective system message for a detected failure.
+- ``nudge_agent``  — builds the corrective message for a detected failure.
 - failure-mode phrase/pattern tables used by both.
+
+A nudge is delivered as a ``HumanMessage``, not a ``SystemMessage``: many served
+chat templates reject a system message that is not the first in the list (llama.cpp
+returns a 500 with "System message must be at the beginning"), and a nudge lands
+mid-conversation by definition. It carries ``NUDGE_MARKER`` so the counters below
+can still tell nudges apart from what the user actually typed.
 """
 
 import logging
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 
 from .config import config
 
@@ -78,11 +84,22 @@ NUDGE_CODE_BLOCK = (
 )
 
 
+def is_nudge(message) -> bool:
+    """True for a message this module injected, rather than one the user sent."""
+    content = getattr(message, "content", "")
+    return isinstance(content, str) and content.startswith(NUDGE_MARKER)
+
+
+def _turn_start(message) -> bool:
+    """True where the current turn begins: a real user message, nudges excluded."""
+    return isinstance(message, HumanMessage) and not is_nudge(message)
+
+
 def ai_turns_since_human(messages) -> int:
-    """Count consecutive AI messages back to (not including) the last HumanMessage."""
+    """Count consecutive AI messages back to (not including) the last user message."""
     count = 0
     for m in reversed(messages):
-        if isinstance(m, HumanMessage):
+        if _turn_start(m):
             break
         if getattr(m, "type", None) == "ai":
             count += 1
@@ -97,19 +114,18 @@ def nudges_since_human(messages) -> int:
     """
     count = 0
     for m in reversed(messages):
-        if isinstance(m, HumanMessage):
+        if _turn_start(m):
             break
-        content = getattr(m, "content", "")
-        if isinstance(content, str) and content.startswith(NUDGE_MARKER):
+        if is_nudge(m):
             count += 1
     return count
 
 
 def final_answers_since_human(messages) -> int:
-    """Count no-tool-call AI messages back to (not including) the last HumanMessage."""
+    """Count no-tool-call AI messages back to (not including) the last user message."""
     count = 0
     for m in reversed(messages):
-        if isinstance(m, HumanMessage):
+        if _turn_start(m):
             break
         if getattr(m, "type", None) == "ai" and not (getattr(m, "tool_calls", None) or []):
             count += 1
@@ -125,7 +141,7 @@ def nudge_agent(state):
         nudge_text = NUDGE_CODE_BLOCK
     else:
         nudge_text = NUDGE_PERMISSION
-    return {"messages": [SystemMessage(content=nudge_text)]}
+    return {"messages": [HumanMessage(content=nudge_text)]}
 
 
 def route_agent(state):

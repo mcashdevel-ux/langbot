@@ -1,8 +1,13 @@
 """Unit tests for routing.py — agent routing, nudges, duplicate-answer guard."""
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 import components.routing as routing
+
+
+def _nudge(text=None):
+    """A nudge as the graph appends it: a HumanMessage carrying the marker."""
+    return HumanMessage(content=text or routing.NUDGE_PERMISSION)
 
 
 def _state(*messages):
@@ -36,8 +41,7 @@ class TestRouteAgent:
 
     def test_nudge_budget_exhausted_falls_through_to_distill(self):
         msgs = [HumanMessage(content="go")]
-        msgs += [SystemMessage(content=routing.NUDGE_PERMISSION)
-                 for _ in range(routing.MAX_NUDGES_PER_TURN)]
+        msgs += [_nudge() for _ in range(routing.MAX_NUDGES_PER_TURN)]
         msgs.append(AIMessage(content="Would you like me to proceed?"))
         assert routing.route_agent(_state(*msgs)) == "distill"
 
@@ -99,7 +103,7 @@ class TestCounters:
         msgs = [
             HumanMessage(content="a"),
             AIMessage(content="1"),
-            SystemMessage(content="nudge"),
+            _nudge(),
             AIMessage(content="2"),
         ]
         assert routing.ai_turns_since_human(msgs) == 2
@@ -125,6 +129,23 @@ class TestCounters:
 
 
 class TestNudgeAgent:
+    def test_nudge_is_not_a_system_message(self):
+        # Served chat templates reject a system message that is not first, so a
+        # mid-conversation nudge must arrive in the user role instead.
+        out = routing.nudge_agent(_state(AIMessage(content="Should I proceed?")))
+        message = out["messages"][0]
+        assert isinstance(message, HumanMessage)
+        assert routing.is_nudge(message)
+
+    def test_nudges_do_not_end_the_turn_they_correct(self):
+        # The nudge is a HumanMessage, so the counters must not mistake it for
+        # the user speaking: otherwise the budget resets and the guard forgets
+        # the answer it just rejected.
+        msgs = [HumanMessage(content="go"), AIMessage(content="answer 1"), _nudge()]
+        assert routing.nudges_since_human(msgs) == 1
+        assert routing.final_answers_since_human(msgs) == 1
+        assert routing.ai_turns_since_human(msgs) == 1
+
     def test_code_block_failure_gets_code_block_nudge(self):
         state = _state(AIMessage(content="```bash\ncurl https://x\n```"))
         out = routing.nudge_agent(state)["messages"][0]
