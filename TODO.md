@@ -29,16 +29,7 @@ on the host.  Pick one approach:
 
 ---
 
-## 2. Doc fixes — stale references & missing info (no live model)
-
-| # | What | Where | Effort |
-|---|------|-------|--------|
-| 1 | Stale "556-test suite" in CODE_REVIEW intro → should say 629 | `CODE_REVIEW.md` L27 | 2 min |
-| 2 | Stale "reserve 8192" in README context budget example + paragraph | `README.md` | 5 min |
-| 3 | `components/warmup.py` missing from README project-layout tree | `README.md` | 2 min |
-| 4 | `MEMORY_POLICY.md` not updated for Track 11 `confidence` metadata column | `MEMORY_POLICY.md` | 5 min |
-| 5 | `components/supabase_sync.py` exists but is never documented — investigate (feature or dead code?) | `supabase_sync.py` | 15 min |
-| 6 | `CONTRIBUTING.md` "Where help is wanted" lists Memory quality and Search engines as open, but both got PR #42 work — add a ✓ or rephrase | `CONTRIBUTING.md` | 10 min |
+# Doc fixes done (PR #43).
 
 ---
 
@@ -69,8 +60,9 @@ and compare real results to expectations:
 ## 5. Future / deferred
 
 - **Blast-radius gate** — warn on `rm -rf`, `push --force`, `DROP` (deferred: M6).
-- **New agent tools** — DB queries, email, data extraction (see CONTRIBUTING.md).
-- **Terminal UX** — paste handling, streaming improvements.
+- **New agent tools** ✔ (PR #45: plugin system + py_eval + http_request; see `tools/plugins/`). More tools welcome.
+- **Terminal UX** ✔ (PR #44: context health bar in REPL, streaming multi-engine search progress, tool timing in panels). More improvements welcome.
+- **SearXNG engine adapters** ✔ (PR #44: StackExchange + PubMed added alongside DDG/Wikipedia/arXiv/GitHub).
 - **Model compatibility** — prompt/nudge tuning for troublesome local models.
 - **CI** — GitHub Actions blocked by billing lock (#35).
 
@@ -80,6 +72,9 @@ and compare real results to expectations:
 
 | # | What |
 |---|------|
+| PR #45 | Plugin tool system (`tools/plugins/`) — auto-discovered tools with router registration; `py_eval` (sandboxed Python) + `http_request` (direct HTTP client) |
+| PR #44 | Terminal UX: context health bar in REPL, streaming multi-engine search progress, tool timing in panels; new engines: StackExchange + PubMed |
+| PR #43 | Doc fixes: stale numbers, missing modules, done-item marking across CODE_REVIEW/README/CONTRIBUTING/TODO |
 | PR #42 | 7-track improvements: reserve shrink (8192→2000), thinking toggle, embedding routing, multi-engine dedup + authority scoring, memory quality (confidence + pruning), eval harness, A7.4/B3.3/C8.6 |
 | #27 | Token-budgeted compaction, per-turn tool binding, warmup thread |
 | #30/#31 | Rate-limit-aware distillation tier chain |
