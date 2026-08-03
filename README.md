@@ -221,11 +221,18 @@ in order, with the local model always last:
 
 | Tier | Free-tier limits (RPM / RPD / TPM / TPD) | Why here |
 |------|------------------------------------------|----------|
-| `llama-3.3-70b-versatile` | 30 / 1K / 12K / 100K | best free instruction-follower |
-| `openai/gpt-oss-120b` | 30 / 1K / 8K / 200K | comparable, separate per-model quota |
+| `openai/gpt-oss-120b` | 30 / 1K / 8K / 200K | best remaining free instruction-follower |
 | `qwen/qwen3.6-27b` | 30 / 1K / 8K / 200K | native to the prompt's `/no_think` hint |
-| `llama-3.1-8b-instant` | 30 / 14.4K / 6K / 500K | weakest, deepest daily quota |
+| `openai/gpt-oss-20b` | 30 / 1K / 8K / 200K (unconfirmed, see note) | weakest, last before local |
 | local model | — | always available, no network, no quota |
+
+`llama-3.3-70b-versatile` and `llama-3.1-8b-instant` previously held the first and
+last slots; Groq deprecated both on June 17, 2026 with a shutdown date of August 16,
+2026 (see [console.groq.com/docs/deprecations](https://console.groq.com/docs/deprecations)),
+and its own migration guidance points to the three models above. `openai/gpt-oss-20b`'s
+TPD is confirmed from a live 429 response; its RPM/RPD/TPM are carried over from
+`gpt-oss-120b` as an estimate pending confirmation against
+[console.groq.com/docs/rate-limits](https://console.groq.com/docs/rate-limits).
 
 Quotas are per model *and* per organization, so the chain multiplies the available
 budget rather than re-hitting one bucket. Limits are respected *before* a call, not

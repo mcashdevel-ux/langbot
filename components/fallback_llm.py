@@ -12,11 +12,15 @@ down, no API key configured — and distillation must never become a hard depend
 on one. So tiers are tried in order and the last one is always the local model the
 agent itself runs on:
 
-    llama-3.3-70b-versatile   best free instruction-follower; strictest quota
-    openai/gpt-oss-120b       comparable quality, separate per-model quota
-    qwen/qwen3.6-27b          smaller, and native to the prompt's /no_think hint
-    llama-3.1-8b-instant      weakest, but 14.4K requests/day of headroom
+    openai/gpt-oss-120b       best free instruction-follower; strictest quota
+    qwen/qwen3.6-27b          comparable quality, separate per-model quota
+    openai/gpt-oss-20b        weakest, but the deepest remaining daily quota
     (local)                   always available, no network, no quota
+
+Groq deprecated llama-3.3-70b-versatile and llama-3.1-8b-instant on June 17, 2026,
+shutting both down on August 16, 2026 (https://console.groq.com/docs/deprecations);
+they previously held the first and last slots here. Groq's own migration guidance
+points to the three models above, which is what this chain now uses.
 
 Quotas are per model *and* per organization, so the chain genuinely multiplies the
 available budget rather than re-hitting one bucket.
@@ -61,18 +65,20 @@ GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 # disables remote tiers and leaves the local model doing the work, as it did
 # before this module existed.
 DEFAULT_TIERS = [
-    {"model": "llama-3.3-70b-versatile", "base_url": GROQ_BASE_URL,
-     "api_key_env": "GROQ_API_KEY",
-     "rpm": 30, "rpd": 1000, "tpm": 12000, "tpd": 100000},
     {"model": "openai/gpt-oss-120b", "base_url": GROQ_BASE_URL,
      "api_key_env": "GROQ_API_KEY",
      "rpm": 30, "rpd": 1000, "tpm": 8000, "tpd": 200000},
     {"model": "qwen/qwen3.6-27b", "base_url": GROQ_BASE_URL,
      "api_key_env": "GROQ_API_KEY",
      "rpm": 30, "rpd": 1000, "tpm": 8000, "tpd": 200000},
-    {"model": "llama-3.1-8b-instant", "base_url": GROQ_BASE_URL,
+    # TPD confirmed (200K, seen verbatim in a live 429 response); RPM/RPD/TPM
+    # are carried over from the same-family gpt-oss-120b entry above as a
+    # reasonable estimate pending confirmation against
+    # https://console.groq.com/docs/rate-limits — verify before relying on
+    # this tier's headroom in production.
+    {"model": "openai/gpt-oss-20b", "base_url": GROQ_BASE_URL,
      "api_key_env": "GROQ_API_KEY",
-     "rpm": 30, "rpd": 14400, "tpm": 6000, "tpd": 500000},
+     "rpm": 30, "rpd": 1000, "tpm": 8000, "tpd": 200000},
 ]
 
 MINUTE = 60.0

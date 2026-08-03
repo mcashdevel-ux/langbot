@@ -54,12 +54,6 @@
     "reserve_output_tokens": 512,
     "tiers": [
       {
-        "model": "llama-3.3-70b-versatile",
-        "base_url": "https://api.groq.com/openai/v1",
-        "api_key_env": "GROQ_API_KEY",
-        "rpm": 30, "rpd": 1000, "tpm": 12000, "tpd": 100000
-      },
-      {
         "model": "openai/gpt-oss-120b",
         "base_url": "https://api.groq.com/openai/v1",
         "api_key_env": "GROQ_API_KEY",
@@ -72,10 +66,10 @@
         "rpm": 30, "rpd": 1000, "tpm": 8000, "tpd": 200000
       },
       {
-        "model": "llama-3.1-8b-instant",
+        "model": "openai/gpt-oss-20b",
         "base_url": "https://api.groq.com/openai/v1",
         "api_key_env": "GROQ_API_KEY",
-        "rpm": 30, "rpd": 14400, "tpm": 6000, "tpd": 500000
+        "rpm": 30, "rpd": 1000, "tpm": 8000, "tpd": 200000
       }
     ]
   },
