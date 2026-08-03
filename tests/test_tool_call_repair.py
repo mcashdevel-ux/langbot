@@ -262,3 +262,28 @@ class TestRoutingIntegration:
         assert route_agent({"messages": [HumanMessage(content="analyze cwd"), msg]}) != "tools"
         assert repair_message(msg, NAMES) is True
         assert route_agent({"messages": [HumanMessage(content="analyze cwd"), msg]}) == "tools"
+
+
+class TestStats:
+    """The counters are how /health answers "is --jinja actually working?"."""
+
+    def setup_method(self):
+        tool_call_repair.reset_stats()
+
+    def test_recovered_calls_counts_only_real_repairs(self):
+        msg = FakeAI('{"content": "Analyzing.", "tool_calls": '
+                     '[{"name": "glob_list", "args": {"pattern": "."}}]}')
+        assert repair_message(msg, NAMES) is True
+        # A clean answer must not move the counters, or the signal is worthless.
+        assert repair_message(FakeAI("All done."), NAMES) is False
+        assert tool_call_repair.stats() == {"recovered_calls": 1, "cleaned_answers": 0}
+
+    def test_cleaned_answers_counted_separately(self):
+        msg = FakeAI('{"content": "I have recalled the greeting.", "tool_calls": []}')
+        assert repair_message(msg, NAMES) is True
+        assert tool_call_repair.stats() == {"recovered_calls": 0, "cleaned_answers": 1}
+
+    def test_stats_is_a_copy(self):
+        snapshot = tool_call_repair.stats()
+        snapshot["recovered_calls"] = 99
+        assert tool_call_repair.stats()["recovered_calls"] == 0
