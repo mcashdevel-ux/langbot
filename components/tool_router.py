@@ -124,6 +124,34 @@ def _get_embeddings_model():
         return _embeddings_model
 
 
+def register(tool_descriptions: "dict[str, str]", triggers: "dict[str, str]") -> None:
+    """Register external (plugin) tools for routing.
+
+    Called once at startup. Tool descriptions are added to the embedding index;
+    triggers are compiled and added to the keyword matcher.
+    Only *new* entries are added — existing entries are not overwritten, so
+    built-in tools always take precedence over plugins with the same name.
+
+    Args:
+        tool_descriptions: ``{tool_name: description}`` for embedding similarity.
+        triggers: ``{tool_name: regex_pattern}`` for keyword routing.
+    """
+    for name, desc in (tool_descriptions or {}).items():
+        if name not in _TOOL_DESCRIPTIONS:
+            _TOOL_DESCRIPTIONS[name] = desc
+
+    for name, pattern in (triggers or {}).items():
+        if name not in _COMPILED:
+            _COMPILED[name] = re.compile(pattern, re.I)
+    # Invalidate cached description vectors so they are recomputed on the next
+    # embedding lookup (which will now include the plugin descriptions).
+    _desc_vectors.clear()
+    logger.debug(
+        "tool_router: registered %d plugin description(s), %d trigger(s)",
+        len(tool_descriptions or {}), len(triggers or {}),
+    )
+
+
 def _ensure_desc_vectors() -> None:
     """Pre-compute description embeddings on first use."""
     if _desc_vectors:

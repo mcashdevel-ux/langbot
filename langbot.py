@@ -79,7 +79,8 @@ from components import (
 )
 from components import context_budget as _ctx
 from components import housekeeping as _housekeeping
-from components.tool_router import select_tools as _select_tools
+from components.tool_router import select_tools as _select_tools, register as _register_plugin_tools
+from tools.plugins import discover_plugins
 from components.routing import (
     RECURSION_LIMIT,
     is_nudge,
@@ -373,6 +374,14 @@ tools = [
     search_web, fetch_url, read_scratch,
     remember, recall, vault,
 ]
+
+# Dynamically loaded plugin tools (tools/plugins/*.py).
+# Each plugin exports TOOLS, DESCRIPTIONS, and TRIGGERS.
+_plugin_tools, _plugin_descs, _plugin_triggers = discover_plugins()
+if _plugin_tools:
+    tools.extend(_plugin_tools)
+    _register_plugin_tools(_plugin_descs, _plugin_triggers)
+
 _TOOL_NAMES = {t.name for t in tools}
 
 # Binding all twenty schemas on every step is the single largest fixed cost in
