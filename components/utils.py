@@ -14,8 +14,10 @@ from typing import Any, Union
 
 from .config import config
 
-# Default cap for tool output / file reads surfaced to the model.
-MAX_OUTPUT_CHARS = config.get("tools.max_output_chars", 20000)
+# Default cap for tool output / file reads surfaced to the model. Sized for a
+# small local model on a 32k window: 20k chars is a third of that window spent
+# on one result, and the full text is a read_scratch call away anyway.
+MAX_OUTPUT_CHARS = config.get("tools.max_output_chars", 8000)
 TRUNCATION_MARKER = "\n...[truncated]"
 
 

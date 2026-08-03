@@ -167,11 +167,14 @@ class TestExampleFile:
     def test_example_matches_the_shipped_defaults(self):
         """The example file documents defaults, so it must not change behaviour."""
         import components.code_search as code_search
+        import components.context_budget as context_budget
         import components.file_ops as file_ops
         import components.logging_setup as logging_setup
         import components.memory_worker as memory_worker
         import components.routing as routing
         import components.tool_call_repair as tool_call_repair
+        import components.tool_router as tool_router
+        import components.utils as utils
         import components.web_tools as web_tools
 
         example_path = REPO_ROOT / "langbot.config.example.json"
@@ -191,3 +194,11 @@ class TestExampleFile:
         assert example["logging"]["backup_count"] == logging_setup.LOG_BACKUP_COUNT
         assert example["routing"]["max_nudges_per_turn"] == routing.MAX_NUDGES_PER_TURN
         assert example["routing"]["recursion_limit"] == routing.RECURSION_LIMIT
+        assert example["tools"]["max_output_chars"] == utils.MAX_OUTPUT_CHARS
+        assert example["tools"]["dynamic_binding"] == tool_router.DYNAMIC_BINDING
+        assert example["tools"]["core"] == tool_router.CORE_TOOLS
+        assert example["context"]["budget_tokens"] == context_budget.BUDGET_TOKENS
+        assert example["context"]["reserve_tokens"] == context_budget.RESERVE_TOKENS
+        assert example["context"]["compact_at"] == context_budget.COMPACT_AT
+        assert example["context"]["keep_last_messages"] == context_budget.KEEP_LAST_MESSAGES
+        assert example["context"]["summary_max_chars"] == context_budget.SUMMARY_MAX_CHARS
