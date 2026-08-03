@@ -225,7 +225,9 @@ Groq's migration guidance: `openai/gpt-oss-120b` → `qwen/qwen3.6-27b` → `ope
 2. Consider password-by-default or a clearer at-rest warning for the vault (C3 remaining).
 3. ~~Tidy the remaining engines/vault nits (L4, L5, L7–L9).~~ ✅ Fixed (#41).
 
-*2026-08 follow-up — 7-track improvements landed (see PR):*
+*2026-08 follow-up — improvements landed (see PRs):*
+
+**PR #42 — 7-track:**
 - `reserve_tokens` shrunk from 8192 → 2000 (measured overhead ~1.2K).
 - `llm.thinking_mode` config with `/no_think` injection and thinking-token tracking.
 - Embedding-based tool routing (MiniLM) as an additive signal to regex triggers.
@@ -235,3 +237,14 @@ Groq's migration guidance: `openai/gpt-oss-120b` → `qwen/qwen3.6-27b` → `ope
   confidence scoring, automatic pruning of stale low-confidence facts.
 - Eval harness: 15 end-to-end REPL scenarios in `tests/test_eval_harness.py`.
 - Open upgrade-plan items A7.4, B3.3, C8.6 now have test coverage.
+
+**PR #44 — Terminal UX + engines:**
+- Context health bar `[████░░ 62%]` in the REPL prompt (green/yellow/red thresholds).
+- Streaming multi-engine search progress: `🔍 Searching [3/6] ✓ duckduckgo (8) ✓ wikipedia (3)`.
+- Tool elapsed-time in Rich result panels: `✓ 📁 read_file (1.2s)`.
+- Two new SearXNG engine adapters: StackExchange (code) and PubMed (academic).
+
+**PR #45 — Plugin tool system:**
+- `tools/plugins/` — auto-discovered tools; adding one = dropping a `.py` file.
+- `tool_router.register()` — plugin descriptions feed the embedding index + regex matcher.
+- Two plugins ship: `py_eval` (sandboxed Python evaluator) and `http_request` (direct HTTP client).

@@ -63,13 +63,22 @@ long-term memory (Chroma + sentence-transformers).
 - **Thinking-mode toggle** — `llm.thinking_mode` (`"auto"`, `"off"`, `"on"`) controls
   whether Qwen3-family models spend tokens on `<think>` reasoning blocks.  `/health` reports
   accumulated thinking-token overhead.
+- **Plugin tool system** (`tools/plugins/`) — new tools are auto-discovered at startup
+  with no changes to `langbot.py`. Each plugin exports its tool function, an embedding
+  description, and regex triggers for the tool router.  Two plugins ship by default:
+  `py_eval` (sandboxed Python evaluator with `json`, `re`, `math`, `itertools`, etc.)
+  and `http_request` (direct HTTP client — GET/POST/PUT/DELETE/HEAD/OPTIONS via `httpx`).
+- **Context health bar** — a compact `[████░░ 62%]` bar in the REPL prompt shows live
+  context budget usage with colour-coded thresholds (green/yellow/red).
 - **Embedding-based tool routing** — the already-loaded MiniLM model selects tools by
   semantic similarity, so *"check what's stored for auth"* binds `vault` even without the
   word "vault".  Controlled by `tools.embedding_routing` / `tools.embedding_threshold`;
   regex triggers stay on as a secondary signal.
 - **Multi-engine search with dedup** — `search_web(engine="auto")` fans out to DuckDuckGo,
-  Wikipedia, arXiv, and GitHub concurrently, deduplicates results by URL and near-duplicate
+  Wikipedia, arXiv, GitHub, StackExchange, and PubMed concurrently, deduplicates results by URL and near-duplicate
   title, and boosts authoritative sources (`.edu`, `.gov`, Wikipedia, etc.).
+- **Streaming multi-engine progress** — each engine's response is reported live as
+  results arrive: `🔍 Searching [3/6]  ✓ duckduckgo (8)  ✓ wikipedia (3)`.
 - **Memory quality improvements** — the distiller extracts four categories (preferences,
   facts, actions, errors) with explicit negative examples.  Facts carry a `confidence` score,
   and on every startup stale low-confidence distilled facts are pruned automatically
@@ -407,7 +416,10 @@ python -m pytest                    # 629 tests
 `execute_shell_command`, `read_any_file`, `write_any_file`, `patch_file`, `batch_patch`,
 `git_diff`, `find_in_files`, `read_many_files`, `glob_list`, `task_start`, `task_list`,
 `task_status`, `task_output`, `task_kill`, `search_web`, `fetch_url`, `read_scratch`,
-`remember`, `recall`, `vault`.
+`remember`, `recall`, `vault`, `py_eval`, `http_request`.
+
+Additional tools can be added by dropping a `.py` file into `tools/plugins/` — see the
+plugin tool system in Features above.
 
 ### Weak / fine-tuned local models
 
@@ -454,6 +466,8 @@ those warnings is a good signal to fix the model's chat template or prompt forma
 
 ```
 langbot.py              # agent loop, tools, memory, LangGraph wiring (entrypoint)
+tools/
+  plugins/              # auto-discovered agent tools (py_eval, http_request, ...)
 components/
   file_ops.py           # read/write/patch/batch_patch/git_diff file tools
   code_search.py        # find_in_files / read_many_files / glob_list
