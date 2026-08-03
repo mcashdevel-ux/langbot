@@ -26,6 +26,7 @@ the module stays independent of LangChain's message classes.
 import json
 import logging
 import re
+import threading
 import uuid
 
 from .config import config
@@ -37,6 +38,31 @@ logger = logging.getLogger(__name__)
 REPAIR_ENABLED = config.get("compat.repair_json_tool_calls", True)
 # Cap on JSON candidates examined per message — bounds the scan on long answers.
 MAX_CANDIDATES = config.get("compat.repair_max_candidates", 20)
+
+# How often this layer had to step in, so its necessity is measurable rather than
+# assumed: constraining decoding at the server (llama-server --jinja, which turns
+# on grammar-constrained tool calls) should drive ``recovered_calls`` to zero, and
+# that is the signal the repair layer can start shrinking. Surfaced by /health.
+_counts = {"recovered_calls": 0, "cleaned_answers": 0}
+_counts_lock = threading.Lock()
+
+
+def _count(key: str) -> None:
+    with _counts_lock:
+        _counts[key] += 1
+
+
+def stats() -> "dict[str, int]":
+    """Repairs performed since start: text tool calls recovered, answers cleaned."""
+    with _counts_lock:
+        return dict(_counts)
+
+
+def reset_stats() -> None:
+    with _counts_lock:
+        for key in _counts:
+            _counts[key] = 0
+
 
 _FENCE_RE = re.compile(r"^```[a-zA-Z0-9_+-]*\s*\n?|\n?```$")
 
@@ -296,6 +322,7 @@ def repair_message(message, valid_names, arg_aliases=None) -> bool:
         )
         message.content = _clean_markup(remaining)
         message.tool_calls = calls
+        _count("recovered_calls")
         return True
 
     # No calls: the answer may still be wrapped in an envelope, or carry leaked
@@ -306,4 +333,5 @@ def repair_message(message, valid_names, arg_aliases=None) -> bool:
         return False
     logger.debug("tool_call_repair: cleaned a call-less answer (envelope/markup)")
     message.content = cleaned
+    _count("cleaned_answers")
     return True

@@ -181,6 +181,24 @@ Counting uses `tiktoken` when installed and a `chars_per_token` estimate otherwi
 Set `budget_tokens` to the context length the server is actually serving (`llama-server
 -c`), not the model's theoretical maximum.
 
+### Serve tool calls, don't repair them
+
+`components/tool_call_repair.py` exists because a small model asked for a tool by
+*printing* the call into its answer, where nothing executes it. That is a decoding
+problem, and the server can prevent it outright: start `llama-server` with `--jinja`, so
+the model's own chat template is applied and tool calls are generated under a grammar
+constraint and parsed back as real `tool_calls`.
+
+`/health` reports how often the repair layer had to step in:
+
+```
+tool-call repairs   0 recovered, 0 answers cleaned
+```
+
+A non-zero `recovered` count means the server is still emitting tool calls as text —
+check `--jinja` first. Zero across long sessions is the evidence that the repair layer,
+the nudges, and the code-block patterns are belt-and-braces rather than load-bearing.
+
 ### Tool binding
 
 Every bound tool costs its JSON schema in the prompt on every step, and a small model
