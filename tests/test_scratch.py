@@ -17,13 +17,8 @@ class TestScratch:
         assert "hello world" in out
         assert sid in out
 
-    def test_save_truncates_at_max_bytes(self):
-        sid = scratch.save_to_scratch("x" * 100, max_bytes=10)
-        path = os.path.join(scratch.SCRATCH_DIR, f"{sid}.txt")
-        assert os.path.getsize(path) == 10
-
-    def test_default_cap_keeps_large_content(self):
-        content = "y" * 100_000
+    def test_save_never_truncates(self):
+        content = "y" * 500_000
         sid = scratch.save_to_scratch(content)
         path = os.path.join(scratch.SCRATCH_DIR, f"{sid}.txt")
         assert os.path.getsize(path) == len(content)
@@ -72,3 +67,16 @@ class TestScratch:
                 break
             offset = end
         assert reassembled == content
+
+
+class TestOffload:
+    def test_short_content_stays_inline(self):
+        assert scratch.offload("abc", "t", 10, "full output") == "abc"
+
+    def test_long_content_previews_and_saves_in_full(self):
+        content = "z" * 5000
+        out = scratch.offload(content, "t", 100, "full output")
+        assert out.startswith("5000 chars, showing first 100 (full output at scratch:t_")
+        sid = out.split("scratch:")[1].split(")")[0]
+        path = os.path.join(scratch.SCRATCH_DIR, f"{sid}.txt")
+        assert os.path.getsize(path) == len(content)

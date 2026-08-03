@@ -179,7 +179,7 @@ class TestExampleFile:
         assert example["tools"]["read_inline_chars"] == file_ops.READ_INLINE_CHARS
         assert example["tools"]["grep_inline_lines"] == code_search.GREP_INLINE_LINES
         assert example["tools"]["manyfiles_inline_chars"] == code_search.MANYFILES_INLINE_CHARS
-        assert example["web"]["fetch_save_chars"] == web_tools.FETCH_SAVE_CHARS
+        assert example["web"]["fetch_inline_chars"] == web_tools.FETCH_INLINE_CHARS
         assert example["memory"]["worker_queue_size"] == memory_worker.MAX_QUEUE_SIZE
         assert example["memory"]["worker_batch_size"] == memory_worker.MAX_BATCH
         assert example["compat"]["repair_json_tool_calls"] == tool_call_repair.REPAIR_ENABLED
