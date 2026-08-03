@@ -177,18 +177,24 @@ Groq's migration guidance: `openai/gpt-oss-120b` → `qwen/qwen3.6-27b` → `ope
 - **L3 (components/memory_store.py):** ✅ Fixed — metadata reads go through
   `meta.get("text", "")`; the one `meta["text"]` left (`supabase_sync.py`) is guarded by an
   explicit `"text" in meta`.
-- **L4 (components/engines.py):** ⬜ Open — `_script_dir` walks two levels up to look for
-  `searxng-src`; the runtime `git clone` side effect is still implicit.
-- **L5 (components/engines.py):** ⬜ Open — stale docstrings from another project remain
-  (though `web_tools.py` now correctly imports `from .engines import`).
+- **L4 (components/engines.py):** ✅ Fixed — the path walk is named `repo_root` and explained,
+  and the clone is no longer implicit: it logs at warning level (a search turning into a
+  network fetch and tens of megabytes of disk deserves saying), and
+  `web.searxng_auto_clone: false` refuses it with an error naming every path searched.
+- **L5 (components/engines.py):** ✅ Fixed — the module docstring describes this adapter and
+  where the source tree comes from; the logger is `__name__` rather than another project's
+  `sage.engines`, and the unused `_ENGINE_CACHE` is gone.
 - **L6 (components/engines.py):** ✅ Fixed — now
   `engine.categories[0] if engine.categories else "general"`.
-- **L7 (components/engines.py):** ⬜ Open — a fresh `requests.Session()` is created/closed
-  per request (no pooling benefit).
-- **L8 (components/vault.py):** ⬜ Open — `put()` reads the length for the
-  `MAX_CREDENTIALS` check outside the lock; minor TOCTOU if ever multithreaded.
-- **L9 (components/vault.py):** ⬜ Open — duplicate masking helpers:
-  `RedactionFilter.get_masked_value` vs module-level `_mask_value` (the latter unused).
+- **L7 (components/engines.py):** ✅ Fixed — one process-wide `requests.Session` via
+  `_get_session()`, so a search that fans out over several engines pools its connections
+  instead of re-handshaking TLS per request.
+- **L8 (components/vault.py):** ✅ Fixed — the `MAX_CREDENTIALS` count is read inside the
+  lock. Overwriting an existing credential is no longer refused at capacity, since a
+  rotation adds nothing.
+- **L9 (components/vault.py):** ✅ Fixed — one `mask_value()`, which
+  `RedactionFilter.get_masked_value` delegates to. It keeps the fixed-width `abcd...wxyz`
+  form: the old asterisk-per-character mask published the secret's length.
 - **L10 (components/vault.py):** ✅ Fixed — the redactor skip-list is now
   `_CREDENTIAL_TOOL_NAMES`, which includes the actual `vault` tool name (plus the legacy
   per-action names).
