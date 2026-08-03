@@ -107,7 +107,9 @@
 
   "routing": {
     "max_nudges_per_turn": 3,
-    "recursion_limit": 100
+    "recursion_limit": 100,
+    "stagnation_guard": true,
+    "stagnation_exempt_tools": ["task_status", "task_output", "task_list"]
   },
 
   "compat": {
