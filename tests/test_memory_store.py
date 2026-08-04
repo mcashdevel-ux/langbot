@@ -147,3 +147,34 @@ class TestConcurrency:
 
         assert errors == []
         assert ms.count() == 150
+
+
+class TestNewMemoryOperations:
+    def test_list_tags_empty(self, store):
+        ms, _ = store
+        assert ms.list_tags() == []
+
+    def test_list_tags(self, store):
+        ms, _ = store
+        ms.store_memory("fact A", tags=["apple", "banana"])
+        ms.store_memory("fact B", tags=["apple", "cherry"])
+        ms.store_memory("fact C", tags=["banana"])
+        
+        tags = dict(ms.list_tags())
+        assert tags.get("apple") == 2
+        assert tags.get("banana") == 2
+        assert tags.get("cherry") == 1
+
+    def test_delete_memory(self, store):
+        ms, _ = store
+        mem_id = ms.store_memory("deletable fact", tags=["temp"])
+        assert ms.count() == 1
+        
+        # Deleting non-existent should return False
+        assert not ms.delete_memory("non-existent-id")
+        assert ms.count() == 1
+        
+        # Deleting existing should return True and decrease count
+        assert ms.delete_memory(mem_id)
+        assert ms.count() == 0
+        assert not ms.delete_memory(mem_id)
