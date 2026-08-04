@@ -30,6 +30,20 @@ long-term memory (Chroma + sentence-transformers).
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution guide |
 | [CODE_REVIEW.md](CODE_REVIEW.md) | Review guidelines |
 
+## Table of Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Usage](#usage)
+  - [Tests](#tests)
+  - [Available tools](#available-tools)
+  - [Weak / fine-tuned local models](#weak--fine-tuned-local-models)
+- [Security notes](#security-notes)
+- [Project layout](#project-layout)
+- [Known issues](#known-issues)
+- [Contributing](#contributing)
+- [License](#license)
+
 ## Features
 
 - **Autonomous agent loop** (`langbot.py`) — LangGraph `StateGraph` with an agent node, a
