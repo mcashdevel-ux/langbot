@@ -183,34 +183,48 @@ def render_for_summary(messages) -> str:
     return "\n".join(lines)
 
 
-def summary_prompt(messages, previous_summary: str = "") -> str:
+def summary_prompt(messages, previous_summary: str = "", preserve_facts: str = "") -> str:
     previous = (
         f"Summary so far:\n{previous_summary}\n\n" if previous_summary else ""
     )
+    preserve = ""
+    if preserve_facts:
+        preserve = (
+            f"Facts carried forward from earlier compactions "
+            f"(these MUST appear in your summary):\n{preserve_facts}\n\n"
+        )
     return (
         "Compress the earlier part of an agent session into notes the assistant "
         "can work from after the transcript is discarded.\n"
         "Keep: what the user asked for, decisions taken, paths, commands, ids, "
         "scratch ids, and anything still unfinished. Drop pleasantries and "
         "superseded attempts. Write at most one short paragraph, no preamble.\n\n"
+        f"{preserve}"
         f"{previous}Transcript:\n{render_for_summary(messages)}\n/no_think"
     )
 
 
 def compact(messages, summarize, previous_summary: str = "",
             keep_last: int = KEEP_LAST_MESSAGES,
-            keep_last_tokens: int = KEEP_LAST_TOKENS):
+            keep_last_tokens: int = KEEP_LAST_TOKENS,
+            preserve_facts: str = ""):
     """Return ``(dropped, recent, summary)`` for a thread over budget.
 
     ``summarize`` takes a prompt and returns text; a failure there is not fatal
     (the turn proceeds uncompacted) because losing a turn to a summarizer error
     would be worse than being briefly over budget.
+
+    When ``preserve_facts`` is non-empty (recompaction), those facts are included
+    in the summarization prompt as must-preserve material that a future compaction
+    could otherwise lose.
     """
     older, recent = split_for_compaction(messages, keep_last, keep_last_tokens)
     if not older:
         return [], list(messages), previous_summary
     try:
-        summary = summarize(summary_prompt(older, previous_summary)).strip()
+        summary = summarize(
+            summary_prompt(older, previous_summary, preserve_facts)
+        ).strip()
     except Exception:
         logger.warning("context_budget: summarization failed, keeping history",
                        exc_info=True)
