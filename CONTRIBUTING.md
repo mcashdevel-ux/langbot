@@ -1,9 +1,11 @@
 # Contributing to langbot
 
-langbot is **proprietary software** (see [`LICENSE`](./LICENSE)), but contributions are
-welcome. By opening an issue or pull request you agree to the contribution terms in
+langbot is licensed for **personal use only** (see [`LICENSE`](./LICENSE)). Contributions
+are welcome. By opening an issue or pull request you agree to the contribution terms in
 [section 3 of the license](./LICENSE): your contribution is assigned to the copyright
 holder (or, where assignment isn't permitted, licensed to it without restriction).
+
+Please also read our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Where help is most wanted
 
@@ -46,7 +48,7 @@ tested in isolation. To run the agent itself you need a local OpenAI-compatible 
    the network, a live LLM, or state outside `tmp_path` — see the scratch-dir and Chroma-dir
    fixtures in `tests/conftest.py` and `tests/test_memory_store.py` for the pattern.
 3. **Respect the memory policy.** New persistent state goes under `./memory/` and is
-   configurable by environment variable — see [`MEMORY_POLICY.md`](./MEMORY_POLICY.md).
+   configurable by environment variable — see [`MEMORY_POLICY.md`](docs/policies/MEMORY_POLICY.md).
 4. **Never block the interactive loop.** Slow work (LLM calls, embeddings, network I/O)
    belongs in a background worker, as with `components/memory_worker.py`.
 5. **Keep tool output context-cheap.** Return a short preview plus a `scratch:` id instead of

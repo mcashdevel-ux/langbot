@@ -144,4 +144,4 @@ This policy does **NOT** cover:
 
 ## License
 
-This software is licensed for **personal use only**. See [LICENSE](LICENSE) for terms.
+This software is licensed for **personal use only**. See [LICENSE](../../LICENSE) for terms.

@@ -7,11 +7,21 @@ long-term memory (Chroma + sentence-transformers).
 
 > ⚠️ **Security warning:** the agent has **unrestricted shell, file, and web access** and
 > is prompted to act without asking. Only run it in a trusted, single-user, sandboxed
-> environment. See "Security notes" below.
+> environment. See [SECURITY.md](docs/policies/SECURITY.md) for details.
 
-> 📄 **Proprietary software.** All rights reserved — see [`LICENSE`](./LICENSE). Use requires
-> written permission from the copyright holder. Contributions are welcome under the terms in
+> 📄 **Personal Use License.** All rights reserved — see [`LICENSE`](./LICENSE). This
+> software is licensed for personal use only. Contributions are welcome under the terms in
 > [`CONTRIBUTING.md`](./CONTRIBUTING.md).
+
+## Quick Links
+
+| Resource | Description |
+|----------|-------------|
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Community guidelines |
+| [SECURITY.md](docs/policies/SECURITY.md) | Security policy |
+| [MEMORY_POLICY.md](docs/policies/MEMORY_POLICY.md) | Memory management |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution guide |
+| [CODE_REVIEW.md](CODE_REVIEW.md) | Review guidelines |
 
 ## Features
 
