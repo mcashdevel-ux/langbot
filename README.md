@@ -146,6 +146,7 @@ Precedence for a single setting: **environment variable > config file > default.
 | `memory` (search) | `min_similarity`, `recall_overfetch`, `mmr_lambda`, `dedup_similarity`, `dedup_token_overlap`, `lexical_search`, `max_tags`, `auto_tags` | retrieval precision and tags (see below) |
 | `memory` (distiller) | `non_distillable_tools` | tools whose output is machine state, so the turn skips its distillation call |
 | `distill` | `tiers`, `cooldown_seconds`, `temperature`, `timeout`, `reserve_output_tokens` | hosted models tried for distillation before the local one (see below) |
+| `summarize` | `tiers`, `cooldown_seconds`, `temperature`, `timeout` | same tier chain for history compaction; defaults to `distill.*` keys (see below) |
 | `context` | `budget_tokens`, `reserve_tokens`, `compact_at`, `keep_last_messages`, `keep_last_tokens`, `tokenizer_scale`, `summary_max_chars`, `chars_per_token` | history compaction (see below) |
 | `tools` | `read_inline_chars`, `grep_inline_lines`, `manyfiles_inline_chars`, `max_output_chars` | how much tool output goes inline; the full result always reaches scratch |
 | `tools` (binding) | `dynamic_binding`, `core` | which tool schemas are sent each step (see below) |
@@ -204,6 +205,15 @@ one cheap LLM call, and those messages are deleted from the checkpoint as well a
 the prompt. The split never separates a tool result from the message that requested it,
 and the details survive regardless: tool output is already on disk under a `scratch:` id.
 Counting uses `tiktoken` when installed and a `chars_per_token` estimate otherwise.
+
+**Summarization uses the same tiered fallback as distillation** (see below):
+Groq's free-tier models handle compaction when `GROQ_API_KEY` is set, falling back to
+the local model when they are unavailable or out of quota. This matters especially on
+**recompaction** — when the session is long enough that the rolling summary itself
+must be compacted again. A recompaction extracts key facts from the existing summary
+first, then feeds them into the summarization prompt as must-preserve material, so
+facts captured in the first compaction (project paths, decisions, identifiers) survive
+the second. `/health` and `/config` report the summarizer chain alongside distillation.
 
 Set `tokenizer_scale` to bridge the gap between OpenAI's tokenizer (which `tiktoken`
 uses) and the local model's actual tokenizer. Qwen and Llama models consistently produce
