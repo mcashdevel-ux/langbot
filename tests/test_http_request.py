@@ -123,6 +123,28 @@ class TestIsPrivateIp:
     def test_invalid_string(self):
         assert not hr._is_private_ip("not-an-ip")
 
+    # --- IPv4-mapped / IPv4-compatible / 6to4 normalization (T1 fix) ----------
+
+    def test_ipv4_mapped_ipv6_loopback_blocked(self):
+        """::ffff:127.0.0.1 must be caught by the 127.0.0.0/8 block-list entry."""
+        assert hr._is_private_ip("::ffff:127.0.0.1")
+
+    def test_ipv4_mapped_ipv6_private_blocked(self):
+        """::ffff:10.0.0.1 must be caught by the 10.0.0.0/8 block-list entry."""
+        assert hr._is_private_ip("::ffff:10.0.0.1")
+
+    def test_ipv4_mapped_ipv6_public_allowed(self):
+        """::ffff:8.8.8.8 is a public address — the fix must not over-block it."""
+        assert not hr._is_private_ip("::ffff:8.8.8.8")
+
+    def test_ipv4_compatible_loopback_blocked(self):
+        """Deprecated ::127.0.0.1 (IPv4-compatible) must also be blocked."""
+        assert hr._is_private_ip("::7f00:1")  # ::127.0.0.1 in hex
+
+    def test_sixtofour_private_blocked(self):
+        """6to4 address embedding 10.0.0.1 (2002:0a00:0001::/48) must be blocked."""
+        assert hr._is_private_ip("2002:0a00:0001::")
+
 
 # ---------------------------------------------------------------------------
 # _check_host
@@ -187,7 +209,8 @@ class TestHttpRequestSSRF:
     """Tests exercising the full http_request() tool function."""
 
     def _call(self, url, method="GET"):
-        return hr.http_request(method=method, url=url)
+        func = getattr(hr.http_request, "func", hr.http_request)
+        return func(method=method, url=url)
 
     def test_private_target_blocked_before_request(self):
         """Tool must return an error without opening any socket."""
@@ -233,6 +256,30 @@ class TestHttpRequestSSRF:
             with pytest.raises(httpx.InvalidURL, match="SSRF redirect blocked"):
                 hr._ssrf_redirect_hook(redirect_resp)
 
+    def test_redirect_to_ipv4_mapped_blocked(self):
+        """A redirect Location containing an IPv4-mapped IPv6 literal must be blocked.
+
+        This is the end-to-end mirror of test_redirect_to_private_blocked, using
+        the ::ffff:a.b.c.d form.  The hook resolves the host (or literal) via
+        _check_host which now normalises IPv4-mapped addresses correctly.
+        """
+        redirect_resp = _mock_response(
+            status=301, is_redirect=True,
+            location="http://[::ffff:127.0.0.1]/admin",
+        )
+        redirect_resp.url = httpx.URL("https://public.example.com/")
+        # No DNS patching needed — the host *is* a literal IPv6 address;
+        # getaddrinfo will be called but the _is_private_ip check on the
+        # returned address must still block it.
+        def _getaddrinfo_literal(host, *a, **kw):
+            # Return the IPv4-mapped address as AF_INET6 — exactly as a real
+            # dual-stack socket would.
+            return [(socket.AF_INET6, socket.SOCK_STREAM, 0, "", ("::ffff:127.0.0.1", 0, 0, 0))]
+
+        with patch("socket.getaddrinfo", _getaddrinfo_literal):
+            with pytest.raises(httpx.InvalidURL, match="SSRF redirect blocked"):
+                hr._ssrf_redirect_hook(redirect_resp)
+
     def test_opt_out_allows_localhost(self):
         """When BLOCK_PRIVATE_RANGES=False, private IPs should pass through."""
         original = hr.BLOCK_PRIVATE_RANGES
@@ -249,7 +296,8 @@ class TestHttpRequestSSRF:
             hr.BLOCK_PRIVATE_RANGES = original
 
     def test_unsupported_method_rejected(self):
-        result = hr.http_request(method="TRACE", url="https://example.com/")
+        func = getattr(hr.http_request, "func", hr.http_request)
+        result = func(method="TRACE", url="https://example.com/")
         assert "unsupported method" in result.lower()
 
     def test_timeout_handled(self):

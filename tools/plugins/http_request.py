@@ -11,6 +11,34 @@ and every redirect hop — is checked against a block list of private, loopback,
 and link-local ranges before a connection is opened.  Set the config key to
 ``false`` only if you intentionally need to reach ``localhost`` services
 (e.g. your own dev server), consistent with this repo's config-first pattern.
+
+IPv4-mapped / IPv4-compatible normalization
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+``_is_private_ip()`` unwraps IPv6 addresses that embed an IPv4 address before
+running the block-list check:
+
+* **IPv4-mapped** (``::ffff:a.b.c.d``) — the common form produced by dual-stack
+  sockets; ``ipaddress.IPv6Address.ipv4_mapped`` extracts the embedded address.
+* **6to4** (``2002:xx:xx::/48``) — ``ipaddress.IPv6Address.sixtofour``.
+* **IPv4-compatible** (``::a.b.c.d``, deprecated RFC 4291 §2.5.5.1) — detected
+  by checking that the high 96 bits are zero and extracting the low 32 bits.
+
+Without this normalization ``::ffff:127.0.0.1`` would bypass the
+``127.0.0.0/8`` entry because Python's ``ipaddress`` does **not** set
+``.is_loopback`` for IPv4-mapped addresses and none of the pure-IPv6 block
+entries match it.
+
+Known gap — DNS-rebinding TOCTOU
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+``_check_host()`` resolves the target hostname once (via ``socket.getaddrinfo``)
+to decide pass/block; ``httpx`` then performs its **own** independent DNS
+resolution when it opens the actual connection.  An attacker who controls DNS
+with a short TTL could return a public IP for the pre-flight check and a
+private IP moments later for the real connection.  Closing this gap requires
+pinning the checked IP for the socket connect (e.g. a custom
+``httpx.AsyncHTTPTransport`` that resolves once and passes a literal address to
+the OS) — a meaningfully larger transport-layer change tracked as a separate
+follow-up, not part of this patch.
 """
 
 import ipaddress
@@ -61,11 +89,32 @@ _BLOCKED_NETWORKS = [
 
 
 def _is_private_ip(ip_str: str) -> bool:
-    """Return True if *ip_str* falls in any private / reserved / loopback range."""
+    """Return True if *ip_str* falls in any private / reserved / loopback range.
+
+    IPv6 addresses that embed an IPv4 address are unwrapped to their IPv4
+    equivalent before the check so that addresses like ``::ffff:127.0.0.1``
+    are correctly caught by the ``127.0.0.0/8`` block-list entry:
+
+    * IPv4-mapped  ``::ffff:a.b.c.d``  → ``a.b.c.d``  (via ``.ipv4_mapped``)
+    * 6to4         ``2002:xx:xx::``    → embedded v4  (via ``.sixtofour``)
+    * IPv4-compat  ``::a.b.c.d``       → ``a.b.c.d``  (high-96-bits-zero test)
+    """
     try:
         addr = ipaddress.ip_address(ip_str)
     except ValueError:
         return False
+    # Normalise IPv6 forms that embed an IPv4 address so the IPv4 block-list
+    # entries fire correctly for them.
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped is not None:
+            # ::ffff:a.b.c.d  — the common dual-stack / socket form
+            addr = addr.ipv4_mapped
+        elif addr.sixtofour is not None:
+            # 2002:xx:xx::/16 — 6to4 tunnel addresses
+            addr = addr.sixtofour
+        elif int(addr) >> 32 == 0 and int(addr) != 0:
+            # ::a.b.c.d  — deprecated IPv4-compatible form (RFC 4291 §2.5.5.1)
+            addr = ipaddress.IPv4Address(int(addr) & 0xFFFF_FFFF)
     return any(addr in net for net in _BLOCKED_NETWORKS)
 
 
@@ -107,8 +156,6 @@ def _ssrf_redirect_hook(response: httpx.Response) -> None:
     if not location:
         return
     try:
-        # Resolve relative redirects against the current URL.
-        redirect_url = str(response.url.copy_with()).rstrip("/")
         parsed = urlparse(location)
         if not parsed.scheme:
             # Relative redirect — use base host
