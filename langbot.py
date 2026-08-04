@@ -55,6 +55,7 @@ from components.memory_store import (
 )
 from components.memory_worker import DistillJob, MemoryWorker, parse_fact_entries
 from components.fallback_llm import build as _build_distill_llm
+from components.fallback_llm import FallbackLLM, DEFAULT_TIERS, DEFAULT_COOLDOWN as _FALLBACK_COOLDOWN
 from components.warmup import Warmup
 from components.file_ops import (
     read_file as _read_file,
@@ -162,6 +163,58 @@ _distill_llm = _build_distill_llm(
     validate=lambda text: parse_fact_entries(text) is not None,
 )
 _memory_worker = MemoryWorker(llm=_distill_llm)
+
+# ------------------------------------------------------------------------------
+# 2b. Summarizer LLM (Groq tiers → local) — used for history compaction.
+# ------------------------------------------------------------------------------
+# Compaction summarises older messages into a rolling summary that the system
+# prompt carries forward.  The same tiered-fallback pattern used for distillation
+# is applied here: hosted models handle the few sentences of prose that a
+# compaction produces, falling back to the local model when Groq is unavailable.
+# Tiers, temperature, and cooldown read from the same ``distill.*`` config keys;
+# override ``summarize.*`` to split them.
+_summarize_llm = FallbackLLM(
+    llm,
+    tiers=app_config.get("summarize.tiers",
+                          app_config.get("distill.tiers", DEFAULT_TIERS)),
+    validate=lambda text: bool(text and len(text.strip()) > 20),
+    cooldown=app_config.get("summarize.cooldown_seconds",
+                             app_config.get("distill.cooldown_seconds",
+                                            _FALLBACK_COOLDOWN)),
+    temperature=app_config.get("summarize.temperature",
+                                app_config.get("distill.temperature", 0.0)),
+    timeout=app_config.get("summarize.timeout",
+                            app_config.get("distill.timeout", 30.0)),
+)
+
+def _extract_summary_facts(summary_text: str) -> str:
+    """Extract key facts from an existing summary before recompacting it.
+
+    When a rolling summary is recompacted (the thread has grown past the budget
+    again), the new summarizer sees the old summary plus new older messages.
+    Without this pass, facts captured in the first compaction can be silently
+    dropped — the summarizer has no way to know which details from a paragraph
+    of prose are essential.
+
+    This extraction uses the same tiered summmarizer so that Groq's models handle
+    it when available; a failure here is not fatal (compaction proceeds without
+    preserved facts).
+    """
+    prompt = (
+        "Extract the essential facts from this session summary as a short "
+        "bullet list. Include: decisions made, file paths, commands used, "
+        "project names, identifiers, preferences, and anything the assistant "
+        "will need to remember in future turns. One fact per line, no preamble, "
+        "no markdown formatting.\n\n"
+        f"Summary:\n{summary_text}"
+    )
+    try:
+        response = _summarize_llm.invoke(prompt)
+        return (response.content or "").strip()
+    except Exception:
+        logger.warning("compact: fact extraction failed, recompacting "
+                       "without preserved facts")
+        return ""
 
 # ------------------------------------------------------------------------------
 # 3. Tools (original + memory)
@@ -597,8 +650,13 @@ def distill_knowledge(state: AgentState) -> AgentState:
 # 7. Build Graph with Distillation & Autonomous Guardrail
 # ------------------------------------------------------------------------------
 def _summarize(prompt: str) -> str:
-    """One cheap completion, with no tools bound, used to compact history."""
-    return llm.invoke([HumanMessage(content=prompt)]).content or ""
+    """One cheap completion, with no tools bound, used to compact history.
+
+    Uses the tiered summarizer (Groq models first, local model last) so
+    summarization quality does not depend on the local model alone.
+    """
+    response = _summarize_llm.invoke([HumanMessage(content=prompt)])
+    return (response.content or "") if hasattr(response, 'content') else str(response)
 
 
 def compact_context(state: AgentState):
@@ -608,15 +666,23 @@ def compact_context(state: AgentState):
     step that follows it rather than on the next user turn. Messages are dropped
     from the checkpointed state with ``RemoveMessage``, which is what keeps the
     thread from growing forever on disk as well as in the prompt.
+
+    On recompaction (the summary already carries prior compactions), key facts
+    are extracted from the old summary and fed into the summarization prompt so
+    they survive into the new summary.
     """
     messages = state["messages"]
     summary = state.get("summary") or ""
     if not _ctx.needs_compaction(messages, summary):
         return {}
+    preserve_facts = ""
+    if summary:
+        preserve_facts = _extract_summary_facts(summary)
     dropped, _kept, new_summary = _ctx.compact(
         messages, _summarize, summary,
         keep_last=_ctx.KEEP_LAST_MESSAGES,
-        keep_last_tokens=_ctx.KEEP_LAST_TOKENS)
+        keep_last_tokens=_ctx.KEEP_LAST_TOKENS,
+        preserve_facts=preserve_facts)
     removable = [m for m in dropped if getattr(m, "id", None)]
     if not removable:
         return {}
@@ -841,6 +907,7 @@ def _handle_slash(text: str, config: dict) -> bool:
         ui.kv("memory worker", f"queue {_memory_worker_mod.MAX_QUEUE_SIZE}, "
                                f"batch {_memory_worker_mod.MAX_BATCH}")
         ui.kv("distillation", _distill_llm.describe())
+        ui.kv("summarizer", _summarize_llm.describe())
         ui.kv("log file", str(_log_path() or "(stderr)"))
         return False
     if cmd == "info":
@@ -863,6 +930,7 @@ def _handle_slash(text: str, config: dict) -> bool:
         ui.kv("tool-call repairs", f"{_repairs['recovered_calls']} recovered, "
                                    f"{_repairs['cleaned_answers']} answers cleaned")
         ui.kv("distillation", _distill_llm.describe())
+        ui.kv("summarizer", _summarize_llm.describe())
         ui.kv("warmup", _warmup.summary())
         ui.kv("disk freed at start", _sweep_summary)
         ui.kv("context", _ctx.stats_summary())

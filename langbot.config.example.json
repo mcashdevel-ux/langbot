@@ -81,6 +81,14 @@
     ]
   },
 
+  "summarize": {
+    "_comment": "Same tier chain as distillation, defaulting to distill.* keys. Set separately to give the summarizer different tiers or temperature.",
+    "tiers": null,
+    "temperature": 0.0,
+    "cooldown_seconds": 300,
+    "timeout": 30
+  },
+
   "context": {
     "budget_tokens": 32768,
     "reserve_tokens": 2000,
