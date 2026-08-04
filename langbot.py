@@ -44,6 +44,7 @@ except ModuleNotFoundError:
 
 from components.web_tools import search_web as _search_web, fetch_url as _fetch_url
 from components.scratch import offload as _offload, read_scratch as _read_scratch
+from components.safety import catastrophic_reason as _catastrophic_reason
 from components.utils import MAX_OUTPUT_CHARS, truncate
 # Aliased: `config` is the per-thread graph config in this module's REPL helpers.
 from components.config import CONFIG_ENV_VAR, CONFIG_FILENAME, config as app_config
@@ -285,6 +286,12 @@ def execute_shell_command(command: str, cwd: str = "", timeout: int = 120) -> st
     Long output is previewed inline, with the whole of it saved to scratch and
     reachable via 'read_scratch'.
     """
+    # --- Hard refusal for catastrophic commands (whole-system, irreversible) ---
+    _reason = _catastrophic_reason(command)
+    if _reason:
+        logger.warning("catastrophic_command_blocked: refused %r (%s)", command, _reason)
+        return f"Refused: command not executed ({_reason})."
+
     # --- T4. Blast-radius pattern warning check ---
     blast_patterns = app_config.get(
         "tools.blast_radius_patterns",
@@ -394,6 +401,10 @@ def task_start(command: str, cwd: str = "") -> str:
     Use for servers, watchers, or anything that should keep running while you
     continue working. Inspect with task_list/task_output; stop with task_kill.
     """
+    _reason = _catastrophic_reason(command)
+    if _reason:
+        logger.warning("catastrophic_command_blocked: refused task_start %r (%s)", command, _reason)
+        return f"Refused: command not executed ({_reason})."
     return _tasks.task_start(command, cwd=cwd)
 
 @tool
