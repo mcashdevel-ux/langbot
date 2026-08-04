@@ -107,7 +107,9 @@ def setup_readline(histfile=None, history_length: int = 2000):
 
     _cmds = [
         "/help", "/quit", "/exit", "/clear", "/new", "/info",
-        "/knowledge", "/health", "/ls", "/save",
+        "/knowledge", "/health", "/ls", "/save", "/config",
+        "/vault list", "/vault status", "/tasks", "/kill", "/log",
+        "/tags", "/forget", "/history", "/compact",
     ]
 
     def _completer(text, state):

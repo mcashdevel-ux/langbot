@@ -637,3 +637,39 @@ def recall_memories(query: str, n: int = 3) -> list[str]:
 
 def count() -> int:
     return get_collection().count()
+
+
+def list_tags() -> list:
+    """Return a list of all distinct tags and their occurrence counts."""
+    collection = get_collection()
+    if collection.count() == 0:
+        return []
+    try:
+        res = collection.get(include=["metadatas"])
+        metas = res.get("metadatas") or []
+        from collections import Counter
+        counter = Counter()
+        for meta in metas:
+            if meta:
+                tags_str = meta.get("tags", "")
+                for tag in _split_tags(tags_str):
+                    if tag:
+                        counter[tag] += 1
+        return counter.most_common()
+    except Exception as e:
+        logger.warning(f"Failed to list tags: {e}")
+        return []
+
+
+def delete_memory(mem_id: str) -> bool:
+    """Delete a memory by its id. Returns True if the memory existed and was deleted."""
+    collection = get_collection()
+    try:
+        row = collection.get(ids=[mem_id], include=["metadatas"])
+        if row and row.get("ids"):
+            with _write_lock:
+                collection.delete(ids=[mem_id])
+            return True
+    except Exception:
+        pass
+    return False

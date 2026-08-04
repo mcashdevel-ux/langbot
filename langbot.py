@@ -98,6 +98,8 @@ from components.vault import (
     run_action as _vault_run,
     redact as _vault_redact,
     save as _vault_save,
+    _vault_list,
+    _vault_status,
 )
 
 # ------------------------------------------------------------------------------
@@ -853,19 +855,41 @@ def _split_trailing_tags(text: str) -> "tuple[str, list[str]]":
 
 
 _SLASH_HELP = [
-    ("/help", "Show this help"),
-    ("/quit, /exit", "End the session"),
-    ("/new, /clear", "Start a fresh conversation (new memory thread)"),
-    ("/info", "Show model, tool count, thread, memory size"),
-    ("/health", "Show checkpointer, memory, vault, and task status"),
-    ("/config", "Show the active config file (or that defaults are in use)"),
-    ("/ls [dir]", "List files in a directory"),
-    ("/knowledge <q>", "Search long-term memory (a '#tag' query filters by tag)"),
-    ("/save <fact> [#tag ...]", "Store a fact in long-term memory, optionally tagged"),
+    ("Session", "/quit, /exit", "End the session"),
+    ("Session", "/new, /clear", "Start a fresh conversation (new memory thread)"),
+    ("Session", "/history", "Show conversation history summary"),
+    ("Memory", "/knowledge <q>", "Search long-term memory (a '#tag' query filters by tag)"),
+    ("Memory", "/save <fact> [#tag ...]", "Store a fact in long-term memory, optionally tagged"),
+    ("Memory", "/tags", "List distinct memory tags with counts"),
+    ("Memory", "/forget <id>", "Delete a memory from the store by id"),
+    ("Vault", "/vault list", "List credentials stored in the vault"),
+    ("Vault", "/vault status", "Show vault health dashboard"),
+    ("Tasks", "/tasks", "List background tasks and their status"),
+    ("Tasks", "/kill <id>", "Terminate a running background task"),
+    ("Files", "/ls [dir]", "List files in a directory"),
+    ("System", "/help", "Show this help"),
+    ("System", "/info", "Show model, tool count, thread, memory size"),
+    ("System", "/health", "Show checkpointer, memory, vault, and task status"),
+    ("System", "/config", "Show the active config file (or that defaults are in use)"),
+    ("System", "/compact", "Force compaction of older message history into summary"),
+    ("System", "/log [n]", "Show last n lines of the log file"),
 ]
 
 
-def _handle_slash(text: str, config: dict) -> bool:
+def _tail_log(n: int = 30) -> str:
+    path = _log_path()
+    if not path or not os.path.exists(path):
+        return "No log file found."
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            from collections import deque
+            lines = deque(f, maxlen=n)
+            return "".join(lines).strip()
+    except Exception as e:
+        return f"Error reading log file: {e}"
+
+
+def _handle_slash(text: str, config: dict, app: object) -> bool:
     """Handle a /command. Returns True if the session should end.
 
     These are local REPL commands (advertised by input.py's tab-completer);
@@ -877,10 +901,78 @@ def _handle_slash(text: str, config: dict) -> bool:
 
     if cmd in ("quit", "exit"):
         return True
+    if cmd == "history":
+        try:
+            state = app.get_state(config)
+            messages = state.values.get("messages", []) if state else []
+        except Exception as e:
+            ui.warning(f"Failed to retrieve state: {e}")
+            return False
+        if not messages:
+            ui.info("No messages in the current conversation history.")
+            return False
+        
+        ui.header("Conversation History")
+        for i, m in enumerate(messages, 1):
+            role = getattr(m, "type", m.__class__.__name__.replace("Message", "").lower())
+            content = getattr(m, "content", "")
+            if not isinstance(content, str):
+                content = str(content)
+            
+            # Clean up content for a compact single line
+            content_clean = content.replace("\n", " ").strip()
+            content_truncated = content_clean[:80] + "..." if len(content_clean) > 80 else content_clean
+            
+            info_part = f"#{i:02d} {role.upper()}"
+            if role == "tool":
+                tool_name = getattr(m, "name", "unknown")
+                info_part += f" ({tool_name})"
+            elif role == "ai" and getattr(m, "tool_calls", None):
+                tool_names = ", ".join(tc.get("name", "") for tc in m.tool_calls)
+                info_part += f" [calls: {tool_names}]"
+                
+            ui.kv(info_part, content_truncated or "(empty)")
+        return False
     if cmd == "help":
-        ui.header("Commands")
-        for name, desc in _SLASH_HELP:
-            ui.kv(name, desc)
+        groups = {}
+        for grp, name, desc in _SLASH_HELP:
+            groups.setdefault(grp, []).append((name, desc))
+        order = ["Session", "Memory", "Vault", "Tasks", "System", "Files"]
+        for grp in order:
+            if grp in groups:
+                ui.header(grp)
+                for name, desc in groups[grp]:
+                    ui.kv(name, desc)
+        return False
+    if cmd == "vault":
+        sub = arg.lower() if arg else ""
+        if sub == "list":
+            ui.info(_vault_list())
+            return False
+        elif sub == "status":
+            ui.info(_vault_status())
+            return False
+        else:
+            ui.warning("Usage: /vault list | /vault status")
+            return False
+    if cmd == "tasks":
+        ui.info(_tasks.task_list())
+        return False
+    if cmd == "kill":
+        if not arg:
+            ui.warning("Usage: /kill <task_id>")
+            return False
+        ui.info(_tasks.task_kill(arg))
+        return False
+    if cmd == "log":
+        n = 30
+        if arg:
+            try:
+                n = int(arg)
+            except ValueError:
+                ui.warning("Usage: /log [number_of_lines]")
+                return False
+        ui.info(_tail_log(n))
         return False
     if cmd in ("new", "clear"):
         new_id = f"session_{uuid.uuid4().hex[:8]}"
@@ -954,11 +1046,66 @@ def _handle_slash(text: str, config: dict) -> bool:
                     f"({_memory_store.MIN_SIMILARITY}).")
             return False
         ui.info("\n".join(
-            f"- [{m.score:.2f} {'+'.join(m.matched) or 'dense'}] {m.text}"
+            f"- [{m.id[:8]} | {m.score:.2f} {'+'.join(m.matched) or 'dense'}] {m.text}"
             + ("  " + " ".join(f"#{t}" for t in m.tags) if m.tags else "")
             + f"  ({m.source or 'unknown'}, {m.timestamp or 'no timestamp'})"
             for m in mems
         ))
+        return False
+    if cmd == "tags":
+        tags = _memory_store.list_tags()
+        if not tags:
+            ui.info("No tags stored in memory.")
+            return False
+        ui.header("Memory Tags")
+        for tag, count in tags:
+            ui.kv(f"#{tag}", f"{count} fact(s)")
+        return False
+    if cmd == "forget":
+        if not arg:
+            ui.warning("Usage: /forget <memory_id>")
+            return False
+        deleted = _memory_store.delete_memory(arg)
+        if deleted:
+            ui.success(f"Deleted memory with id '{arg}'")
+        else:
+            ui.warning(f"Memory with id '{arg}' not found.")
+        return False
+    if cmd == "compact":
+        state = app.get_state(config)
+        messages = state.values.get("messages", []) if state else []
+        summary = state.values.get("summary", "") if state else ""
+        if not messages:
+            ui.info("No conversation history to compact.")
+            return False
+            
+        preserve_facts = ""
+        if summary:
+            preserve_facts = _extract_summary_facts(summary)
+            
+        dropped, recent, new_summary = _ctx.compact(
+            messages, _summarize, summary,
+            keep_last=_ctx.KEEP_LAST_MESSAGES,
+            keep_last_tokens=_ctx.KEEP_LAST_TOKENS,
+            preserve_facts=preserve_facts
+        )
+        if not dropped:
+            ui.info("No older messages available to compact (below keep_last limit).")
+            return False
+            
+        removable = [m for m in dropped if getattr(m, "id", None)]
+        if removable:
+            try:
+                app.update_state(config, {
+                    "messages": [RemoveMessage(id=m.id) for m in removable],
+                    "summary": new_summary
+                })
+                _ctx.record_compaction(len(removable), _ctx.total_tokens(removable))
+                ui.success(f"Successfully compacted {len(removable)} message(s) into rolling summary.")
+            except Exception as e:
+                ui.warning(f"Failed to update checkpoint state: {e}")
+        else:
+            ui.warning("Older messages exist but lack stable checkpoint IDs to be removed.")
         return False
     if cmd == "save":
         if not arg:
@@ -1004,7 +1151,7 @@ def run_repl(app, config):
         if user_input.strip().lower() in ('quit', 'exit'):
             break
         if user_input.startswith('/'):
-            if _handle_slash(user_input, config):
+            if _handle_slash(user_input, config, app):
                 break
             continue
 
