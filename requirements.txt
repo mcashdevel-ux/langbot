@@ -12,3 +12,6 @@ requests>=2.31
 httpx>=0.27
 colorama>=0.4.6
 rich
+tiktoken
+pyyaml
+tomli; python_version < "3.11"
