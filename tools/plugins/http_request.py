@@ -6,11 +6,13 @@ previews.  Results over 2000 chars are saved to the scratchpad.
 """
 
 import logging
-
+import socket
+import ipaddress
 import httpx
 from langchain_core.tools import tool
 
 from components.scratch import save_to_scratch
+from components.config import config
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +20,44 @@ _SAFE_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 
 INLINE_CHARS = 2000
 TIMEOUT = 25
+
+
+def _is_private_ip(ip_str: str) -> bool:
+    """Check if an IP string is loopback, private, link-local, or unspecified."""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        return (
+            ip.is_private or
+            ip.is_loopback or
+            ip.is_link_local or
+            ip.is_unspecified
+        )
+    except ValueError:
+        return False
+
+
+def _is_host_private(host: str) -> bool:
+    """Resolve a host name and check if any resolved IP is private/loopback/link-local."""
+    if _is_private_ip(host):
+        return True
+    try:
+        infos = socket.getaddrinfo(host, None)
+        for family, _, _, _, sockaddr in infos:
+            ip = sockaddr[0]
+            if _is_private_ip(ip):
+                return True
+    except socket.gaierror:
+        pass
+    return False
+
+
+def on_request(request):
+    """Enforce SSRF block on any outgoing request, including redirects."""
+    block_private = config.get("web.http_request_block_private_ranges", True)
+    if block_private:
+        host = request.url.host
+        if _is_host_private(host):
+            raise ValueError(f"Access to private/loopback/link-local address '{host}' is forbidden")
 
 
 @tool
@@ -64,7 +104,7 @@ def http_request(
             return f"http_request error: invalid headers JSON: {e}"
 
     try:
-        with httpx.Client(timeout=TIMEOUT, follow_redirects=True) as client:
+        with httpx.Client(timeout=TIMEOUT, follow_redirects=True, event_hooks={"request": [on_request]}) as client:
             resp = client.request(method=method, url=url, headers=req_headers, content=body or None)
     except httpx.TimeoutException:
         return f"http_request error: request to {url} timed out after {TIMEOUT}s"
