@@ -184,8 +184,8 @@ def _cosine(a, b) -> float:
     return dot / (na * nb)
 
 
-def _embedding_tool_names(turn_text: str, threshold: float = EMBEDDING_THRESHOLD) -> "set[str]":
-    """Tools the turn text is semantically close to, above *threshold*.
+def _embedding_tool_names(turn_text: str) -> "set[str]":
+    """Tools the turn text is semantically close to, above config threshold(s).
 
     Returns the empty set (not None) when embedding routing is disabled, the
     model isn't loaded yet, or no description is above the threshold.
@@ -203,12 +203,19 @@ def _embedding_tool_names(turn_text: str, threshold: float = EMBEDDING_THRESHOLD
                      exc_info=True)
         return set()
 
+    # Determine thresholds config (either a flat float threshold or a per-tool dict)
+    threshold_config = config.get("tools.embedding_threshold", EMBEDDING_THRESHOLD)
+
     selected: "set[str]" = set()
     for name, desc_vec in _desc_vectors.items():
         sim = _cosine(query_vec, desc_vec)
+        if isinstance(threshold_config, dict):
+            threshold = threshold_config.get(name, threshold_config.get("default", 0.35))
+        else:
+            threshold = float(threshold_config)
         if sim >= threshold:
             selected.add(name)
-            logger.debug("tool_router: embedding bound %s (sim=%.3f)", name, sim)
+            logger.debug("tool_router: embedding bound %s (sim=%.3f, threshold=%.3f)", name, sim, threshold)
     return selected
 
 
@@ -231,7 +238,11 @@ def _turn_text(messages) -> str:
     for msg in window:
         content = getattr(msg, "content", "")
         if isinstance(content, str) and content:
-            parts.append(content[:2000])
+            if len(content) > 2000:
+                trimmed = content[:1000] + "\n...[TRUNCATED]...\n" + content[-1000:]
+            else:
+                trimmed = content
+            parts.append(trimmed)
     return "\n".join(parts)
 
 
