@@ -153,5 +153,8 @@ class TestSetupReadline:
         assert completer is not None
         first = completer("/he", 0)
         assert first == "/help"
+        # Test space-separated completion
+        vault_c = completer("/vault l", 0)
+        assert vault_c == "/vault list"
         # Non-slash text yields no completion.
         assert completer("plain", 0) is None

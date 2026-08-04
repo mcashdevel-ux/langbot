@@ -119,7 +119,7 @@ def setup_readline(histfile=None, history_length: int = 2000):
         return None
 
     _rl.set_completer(_completer)
-    _rl.set_completer_delims(" \t\n;")
+    _rl.set_completer_delims("\t\n;")
 
 
 def read_input(prompt: str = "") -> str:
