@@ -1,5 +1,12 @@
 # langbot
 
+[![License: Personal Use](https://img.shields.io/badge/License-Personal%20Use-orange.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![GitHub release (latest)](https://img.shields.io/github/v/release/mcashdevel-ux/langbot?style=flat-square)](https://github.com/mcashdevel-ux/langbot/releases)
+[![GitHub stars](https://img.shields.io/github/stars/mcashdevel-ux/langbot?style=flat-square)](https://github.com/mcashdevel-ux/langbot/stargazers)
+[![GitHub issues](https://img.shields.io/github/issues/mcashdevel-ux/langbot?style=flat-square)](https://github.com/mcashdevel-ux/langbot/issues)
+[![GitHub forks](https://img.shields.io/github/forks/mcashdevel-ux/langbot?style=flat-square)](https://github.com/mcashdevel-ux/langbot/network/members)
+
 A terminal-based, tool-using AI agent built on **LangGraph** + **LangChain**. It talks to
 a local OpenAI-compatible LLM endpoint, can run shell commands, read/write files, search
 the web (via SearXNG engines) and fetch pages, and keeps a persistent, searchable
