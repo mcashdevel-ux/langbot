@@ -3,16 +3,26 @@
 Unlike ``fetch_url`` (which fetches human-readable page content via Jina),
 this tool makes raw HTTP requests and returns status codes, headers, and body
 previews.  Results over 2000 chars are saved to the scratchpad.
+
+SSRF protection
+---------------
+By default (``web.http_request_block_private_ranges: true``) every request —
+and every redirect hop — is checked against a block list of private, loopback,
+and link-local ranges before a connection is opened.  Set the config key to
+``false`` only if you intentionally need to reach ``localhost`` services
+(e.g. your own dev server), consistent with this repo's config-first pattern.
 """
 
+import ipaddress
 import logging
 import socket
-import ipaddress
+from urllib.parse import urlparse
+
 import httpx
 from langchain_core.tools import tool
 
-from components.scratch import save_to_scratch
 from components.config import config
+from components.scratch import save_to_scratch
 
 logger = logging.getLogger(__name__)
 
@@ -21,43 +31,99 @@ _SAFE_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 INLINE_CHARS = 2000
 TIMEOUT = 25
 
+# ---------------------------------------------------------------------------
+# SSRF block-list
+# ---------------------------------------------------------------------------
+BLOCK_PRIVATE_RANGES: bool = config.get("web.http_request_block_private_ranges", True)
+
+_BLOCKED_NETWORKS = [
+    # IPv4
+    ipaddress.ip_network("127.0.0.0/8"),       # Loopback
+    ipaddress.ip_network("10.0.0.0/8"),         # RFC 1918 private
+    ipaddress.ip_network("172.16.0.0/12"),      # RFC 1918 private
+    ipaddress.ip_network("192.168.0.0/16"),     # RFC 1918 private
+    ipaddress.ip_network("169.254.0.0/16"),     # Link-local / AWS metadata
+    ipaddress.ip_network("0.0.0.0/8"),          # "This" network
+    ipaddress.ip_network("100.64.0.0/10"),      # CGNAT shared address space
+    ipaddress.ip_network("192.0.0.0/24"),       # IETF Protocol Assignments
+    ipaddress.ip_network("192.0.2.0/24"),       # TEST-NET-1 (documentation)
+    ipaddress.ip_network("198.18.0.0/15"),      # Benchmarking
+    ipaddress.ip_network("198.51.100.0/24"),    # TEST-NET-2 (documentation)
+    ipaddress.ip_network("203.0.113.0/24"),     # TEST-NET-3 (documentation)
+    ipaddress.ip_network("240.0.0.0/4"),        # Reserved (future use)
+    ipaddress.ip_network("255.255.255.255/32"), # Broadcast
+    # IPv6
+    ipaddress.ip_network("::1/128"),            # Loopback
+    ipaddress.ip_network("fc00::/7"),           # Unique-local
+    ipaddress.ip_network("fe80::/10"),          # Link-local
+    ipaddress.ip_network("::/128"),             # Unspecified
+]
+
 
 def _is_private_ip(ip_str: str) -> bool:
-    """Check if an IP string is loopback, private, link-local, or unspecified."""
+    """Return True if *ip_str* falls in any private / reserved / loopback range."""
     try:
-        ip = ipaddress.ip_address(ip_str)
-        return (
-            ip.is_private or
-            ip.is_loopback or
-            ip.is_link_local or
-            ip.is_unspecified
-        )
+        addr = ipaddress.ip_address(ip_str)
     except ValueError:
         return False
+    return any(addr in net for net in _BLOCKED_NETWORKS)
 
 
-def _is_host_private(host: str) -> bool:
-    """Resolve a host name and check if any resolved IP is private/loopback/link-local."""
-    if _is_private_ip(host):
-        return True
+def _check_host(host: str) -> tuple:
+    """Resolve *host* via DNS and check every returned address.
+
+    Returns ``(is_blocked: bool, reason: str)``.  A DNS failure is treated as
+    blocked — the tool cannot verify safety so it fails closed.
+    """
+    if not BLOCK_PRIVATE_RANGES:
+        return False, ""
     try:
-        infos = socket.getaddrinfo(host, None)
-        for family, _, _, _, sockaddr in infos:
-            ip = sockaddr[0]
-            if _is_private_ip(ip):
-                return True
-    except socket.gaierror:
-        pass
-    return False
+        results = socket.getaddrinfo(host, None)
+    except socket.gaierror as e:
+        return True, f"DNS resolution failed for '{host}': {e}"
+
+    for _family, _type, _proto, _canonname, sockaddr in results:
+        ip = sockaddr[0]
+        if _is_private_ip(ip):
+            return True, (
+                f"Blocked: '{host}' resolves to private/reserved address {ip} "
+                f"(SSRF protection). Set web.http_request_block_private_ranges=false "
+                f"in config to allow local targets."
+            )
+    return False, ""
 
 
-def on_request(request):
-    """Enforce SSRF block on any outgoing request, including redirects."""
-    block_private = config.get("web.http_request_block_private_ranges", True)
-    if block_private:
-        host = request.url.host
-        if _is_host_private(host):
-            raise ValueError(f"Access to private/loopback/link-local address '{host}' is forbidden")
+def _ssrf_redirect_hook(response: httpx.Response) -> None:
+    """httpx event hook — called for every response including redirect hops.
+
+    Raises ``httpx.InvalidURL`` before httpx follows a redirect into a
+    private range, so the blocking happens *before* the connection is opened.
+    """
+    if not BLOCK_PRIVATE_RANGES:
+        return
+    if not response.is_redirect:
+        return
+    location = response.headers.get("location", "")
+    if not location:
+        return
+    try:
+        # Resolve relative redirects against the current URL.
+        redirect_url = str(response.url.copy_with()).rstrip("/")
+        parsed = urlparse(location)
+        if not parsed.scheme:
+            # Relative redirect — use base host
+            base = urlparse(str(response.url))
+            host = base.hostname or ""
+        else:
+            host = parsed.hostname or ""
+        if host:
+            blocked, reason = _check_host(host)
+            if blocked:
+                raise httpx.InvalidURL(f"SSRF redirect blocked: {reason}")
+    except httpx.InvalidURL:
+        raise
+    except Exception as e:
+        raise httpx.InvalidURL(f"SSRF redirect check error: {e}")
 
 
 @tool
@@ -72,6 +138,11 @@ def http_request(
     Use this to call REST APIs, webhooks, or check endpoint health — anything
     that expects a raw HTTP response rather than human-readable page content.
 
+    Requests to private/loopback/link-local addresses (including cloud metadata
+    endpoints such as 169.254.169.254) are blocked by default.  Set
+    ``web.http_request_block_private_ranges: false`` in the config to allow
+    local targets.
+
     Args:
         method: HTTP method (GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS).
         url: Full URL including the scheme (https://...).
@@ -85,12 +156,25 @@ def http_request(
     """
     method = (method or "GET").strip().upper()
     if method not in _SAFE_METHODS:
-        return f"http_request error: unsupported method '{method}'. Allowed: {', '.join(sorted(_SAFE_METHODS))}"
+        return (
+            f"http_request error: unsupported method '{method}'. "
+            f"Allowed: {', '.join(sorted(_SAFE_METHODS))}"
+        )
 
     if not url or not url.startswith(("http://", "https://")):
         url = "https://" + (url or "").lstrip("/")
     if not url.startswith(("http://", "https://")):
         return f"http_request error: invalid URL '{url}'"
+
+    # --- SSRF pre-flight: check the initial target before opening any socket ---
+    if BLOCK_PRIVATE_RANGES:
+        parsed_url = urlparse(url)
+        host = parsed_url.hostname or ""
+        if host:
+            blocked, reason = _check_host(host)
+            if blocked:
+                logger.warning("http_request SSRF block: %s", reason)
+                return f"http_request error: {reason}"
 
     # Parse headers
     req_headers = {}
@@ -104,8 +188,15 @@ def http_request(
             return f"http_request error: invalid headers JSON: {e}"
 
     try:
-        with httpx.Client(timeout=TIMEOUT, follow_redirects=True, event_hooks={"request": [on_request]}) as client:
+        with httpx.Client(
+            timeout=TIMEOUT,
+            follow_redirects=True,
+            event_hooks={"response": [_ssrf_redirect_hook]},
+        ) as client:
             resp = client.request(method=method, url=url, headers=req_headers, content=body or None)
+    except httpx.InvalidURL as e:
+        logger.warning("http_request SSRF redirect block: %s", e)
+        return f"http_request error: {e}"
     except httpx.TimeoutException:
         return f"http_request error: request to {url} timed out after {TIMEOUT}s"
     except Exception as e:
@@ -119,7 +210,10 @@ def http_request(
     if len(body_text) > INLINE_CHARS:
         sid = save_to_scratch(body_text, prefix="http")
         body_preview = body_text[:INLINE_CHARS]
-        body_display = f"{body_preview}\n\n... [{len(body_text):,} total chars] (full body at scratch:{sid})"
+        body_display = (
+            f"{body_preview}\n\n... [{len(body_text):,} total chars] "
+            f"(full body at scratch:{sid})"
+        )
     else:
         body_display = body_text
 
