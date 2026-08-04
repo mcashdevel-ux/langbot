@@ -68,6 +68,8 @@ class TestSetup:
 
     def test_repeated_setup_replaces_its_handlers(self, tmp_path):
         root = logging.getLogger()
+        for h in [h for h in root.handlers if getattr(h, logging_setup._MARKER, False)]:
+            root.removeHandler(h)
         before = len(root.handlers)
         for _ in range(3):
             logging_setup.setup(path=tmp_path / "langbot.log")
