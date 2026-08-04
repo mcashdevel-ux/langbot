@@ -3,5 +3,13 @@
 # can be collected and run.
 -r requirements.txt
 
+# Testing
 pytest>=8,<10
 pytest-cov>=5
+
+# Linting & Formatting
+ruff
+black
+
+# Security
+pip-audit
