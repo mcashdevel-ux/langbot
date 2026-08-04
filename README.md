@@ -32,6 +32,7 @@ long-term memory (Chroma + sentence-transformers).
 
 ## Table of Contents
 
+- [Root](#langbot)
 - [Features](#features)
 - [Requirements](#requirements)
 - [Usage](#usage)
