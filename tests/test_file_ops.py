@@ -181,3 +181,52 @@ class TestGitDiff:
         sid = out.split("scratch:")[1].split(")")[0]
         full = scratch.read_scratch(sid, offset=0, length=1_000_000)
         assert "+new 399" in full
+
+
+class TestPatchFormatValidation:
+    def test_json_patch_validation_success(self, tmp_path):
+        p = tmp_path / "test.json"
+        p.write_text('{"name": "langbot", "status": "open"}')
+        res = file_ops.patch_file(str(p), '"status": "open"', '"status": "closed"')
+        assert "Patched" in res
+        assert '"status": "closed"' in p.read_text()
+
+    def test_json_patch_validation_failure_rollback(self, tmp_path):
+        p = tmp_path / "test.json"
+        p.write_text('{"name": "langbot", "status": "open"}')
+        res = file_ops.patch_file(str(p), '"status": "open"', '"status": "open", invalid_json')
+        assert "invalid JSON after patch (rolled back)" in res
+        assert '"status": "open"' in p.read_text()
+        assert "invalid_json" not in p.read_text()
+
+    def test_toml_patch_validation_success(self, tmp_path):
+        p = tmp_path / "test.toml"
+        p.write_text('name = "langbot"\nstatus = "open"\n')
+        res = file_ops.patch_file(str(p), 'status = "open"', 'status = "closed"')
+        assert "Patched" in res
+        assert 'status = "closed"' in p.read_text()
+
+    def test_toml_patch_validation_failure_rollback(self, tmp_path):
+        p = tmp_path / "test.toml"
+        p.write_text('name = "langbot"\nstatus = "open"\n')
+        res = file_ops.patch_file(str(p), 'status = "open"', 'status = [invalid_toml')
+        assert "invalid TOML after patch (rolled back)" in res
+        assert 'status = "open"' in p.read_text()
+        assert "invalid_toml" not in p.read_text()
+
+    def test_yaml_patch_validation_success(self, tmp_path):
+        p = tmp_path / "test.yaml"
+        p.write_text('name: langbot\nstatus: open\n')
+        res = file_ops.patch_file(str(p), 'status: open', 'status: closed')
+        assert "Patched" in res
+        assert 'status: closed' in p.read_text()
+
+    def test_yaml_patch_validation_failure_rollback(self, tmp_path):
+        p = tmp_path / "test.yaml"
+        p.write_text('name: langbot\nstatus: open\n')
+        res = file_ops.patch_file(str(p), 'status: open', 'status: [invalid_yaml')
+        # Since PyYAML is installed, it will validate and catch this syntax error!
+        assert "invalid YAML after patch (rolled back)" in res
+        assert 'status: open' in p.read_text()
+        assert "invalid_yaml" not in p.read_text()
+

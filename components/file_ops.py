@@ -163,6 +163,43 @@ def patch_file(file_path: str, old_text: str, new_text: str) -> str:
             except OSError:
                 pass
             return f"Error: syntax error after patch (rolled back): {e}"
+    elif path.endswith(".json"):
+        try:
+            json.loads(new_content)
+        except json.JSONDecodeError as e:
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+            except OSError:
+                pass
+            return f"Error: invalid JSON after patch (rolled back): {e}"
+    elif path.endswith(".toml"):
+        try:
+            try:
+                import tomllib
+            except ImportError:
+                import tomli as tomllib
+            tomllib.loads(new_content)
+        except Exception as e:
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+            except OSError:
+                pass
+            return f"Error: invalid TOML after patch (rolled back): {e}"
+    elif path.endswith((".yaml", ".yml")):
+        try:
+            import yaml
+            yaml.safe_load(new_content)
+        except ImportError:
+            pass
+        except Exception as e:
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+            except OSError:
+                pass
+            return f"Error: invalid YAML after patch (rolled back): {e}"
 
     return f"Patched {os.path.basename(path)} ({len(old_text)} -> {len(new_text)} chars)."
 
