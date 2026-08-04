@@ -26,3 +26,4 @@ This directory contains additional documentation for langbot.
 - [CONTRIBUTING.md](../CONTRIBUTING.md) - Contribution guidelines
 - [CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md) - Community code of conduct
 - [CODE_REVIEW.md](../CODE_REVIEW.md) - Code review guidelines
+- [LICENSE](../LICENSE) - License information

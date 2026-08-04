@@ -542,9 +542,16 @@ components/
   supabase_sync.py      # optional cloud sync for long-term memory (two-way Chroma ↔ Supabase)
 langbot.config.example.json  # template listing every setting and its default
 CODE_REVIEW.md          # review of the initial commit with known issues + fixes
-MEMORY_POLICY.md        # where persistent state may live (./memory/ only)
+CODE_OF_CONDUCT.md      # community guidelines
 CONTRIBUTING.md         # how to contribute + where help is wanted
 LICENSE                 # proprietary license
+docs/
+  README.md             # documentation index
+  TODO.md               # planned features
+  langbot-upgrade-plan.md  # version roadmap
+  policies/
+    SECURITY.md         # security policy and best practices
+    MEMORY_POLICY.md    # memory and state management
 ```
 
 ## Known issues
