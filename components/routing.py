@@ -18,6 +18,7 @@ can still tell nudges apart from what the user actually typed.
 
 import json
 import logging
+import re
 
 from langchain_core.messages import HumanMessage, ToolMessage
 
@@ -41,6 +42,16 @@ PERMISSION_PHRASES = (
     "please let me know",
     "do you want to proceed",
 )
+
+# Looser, non-blocking check for near-miss permission asking or hedging language
+# to detect coverage drift over time.
+NEAR_MISS_PATTERNS = (
+    r"\b(would|should|shall|can|do you want)\b.*\b(proceed|continue|go ahead|start)\b",
+    r"\bplease\s+(confirm|let\s+me\s+know|tell\s+me\s+if)\b",
+    r"\bshould\s+i\s+.*\b(now|next)\b",
+    r"\bdo\s+you\s+wish\s+me\s+to\b",
+)
+_NEAR_MISS_REGEX = [re.compile(pat, re.I) for pat in NEAR_MISS_PATTERNS]
 
 # Patterns that indicate the model is hallucinating tool calls as code blocks
 # instead of invoking the actual function-calling interface.
@@ -103,6 +114,29 @@ REPEATED_CALL_NOTICE = (
     "This exact call was already made in this turn and was not run again. Its result "
     "is already above — use it, call with different arguments, or answer the user."
 )
+
+# Global metrics storage for nudge activities
+_STATS = {
+    "nudges_permission": 0,
+    "nudges_code_block": 0,
+    "near_miss_permission_hedges": 0,
+}
+
+
+def stats() -> dict:
+    """Return a copy of current routing/nudge telemetry statistics."""
+    return _STATS.copy()
+
+
+def _check_near_miss_hedges(text: str) -> bool:
+    """Check if text contains looser hedging or permission-seeking language."""
+    if not text:
+        return False
+    # If it's already an explicit permission nudge target, don't double count it as near-miss
+    content_lower = text.lower()
+    if any(phrase in content_lower for phrase in PERMISSION_PHRASES):
+        return False
+    return any(rx.search(text) for rx in _NEAR_MISS_REGEX)
 
 
 def is_nudge(message) -> bool:
@@ -213,10 +247,13 @@ def nudge_agent(state):
     """Inject a targeted correction when the model either asked for permission or
     hallucinated tool calls as code blocks instead of invoking them."""
     last_msg = state["messages"][-1]
-    content_lower = (getattr(last_msg, "content", "") or "").lower()
+    content = getattr(last_msg, "content", "") or ""
+    content_lower = content.lower()
     if any(pat in content_lower for pat in TOOL_AVOIDANCE_PATTERNS):
+        _STATS["nudges_code_block"] += 1
         nudge_text = NUDGE_CODE_BLOCK
     else:
+        _STATS["nudges_permission"] += 1
         nudge_text = NUDGE_PERMISSION
     return {"messages": [HumanMessage(content=nudge_text)]}
 
@@ -234,6 +271,7 @@ def route_agent(state):
         return "tools"
 
     if last_msg.type == "ai" and isinstance(getattr(last_msg, "content", None), str):
+        content = last_msg.content
         if final_answers_since_human(messages[:-1]) > 0:
             # Find the prior final answer so the log carries enough context to
             # root-cause the duplication: same-turn re-entry, server double-
@@ -255,12 +293,17 @@ def route_agent(state):
             )
             return "distill"
 
-        content_lower = last_msg.content.lower()
+        content_lower = content.lower()
         needs_nudge = (
             any(phrase in content_lower for phrase in PERMISSION_PHRASES)
             or any(pat in content_lower for pat in TOOL_AVOIDANCE_PATTERNS)
         )
         if needs_nudge and nudges_since_human(messages) < MAX_NUDGES_PER_TURN:
             return "nudge"
+
+        # Check for near-miss drift on final clean answers
+        if not needs_nudge and _check_near_miss_hedges(content):
+            _STATS["near_miss_permission_hedges"] += 1
+            logger.info("routing telemetry: logged near-miss permission/hedge language in final answer: %r", content[:150])
 
     return "distill"
