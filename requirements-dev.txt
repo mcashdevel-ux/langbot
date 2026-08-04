@@ -1,15 +1,21 @@
-# Dev/test dependencies. Installs the runtime deps too so the full test suite
-# (including tests that import components.vault, which needs `cryptography`)
-# can be collected and run.
+# Development dependencies for langbot
+# Includes runtime deps so full test suite can run.
 -r requirements.txt
 
+# ─────────────────────────────────────────────────────────────────────────────
 # Testing
-pytest>=8,<10
-pytest-cov>=5
+# ─────────────────────────────────────────────────────────────────────────────
+pytest>=8.0,<10
+pytest-cov>=5.0
+pytest-asyncio>=0.24.0
 
+# ─────────────────────────────────────────────────────────────────────────────
 # Linting & Formatting
-ruff
-black
+# ─────────────────────────────────────────────────────────────────────────────
+ruff>=0.6.0
+black>=24.0
 
+# ─────────────────────────────────────────────────────────────────────────────
 # Security
-pip-audit
+# ─────────────────────────────────────────────────────────────────────────────
+pip-audit>=2.7
