@@ -35,6 +35,14 @@ long-term memory (Chroma + sentence-transformers).
 - [Root](#langbot)
 - [Features](#features)
 - [Requirements](#requirements)
+- [Fresh Start](#fresh-start)
+  - [1. Clone the repository](#1-clone-the-repository)
+  - [2. Install dependencies](#2-install-dependencies)
+  - [3. Set up the LLM](#3-set-up-the-llm)
+  - [4. Set up API keys (optional)](#4-set-up-api-keys-optional)
+  - [5. Set up SearXNG (optional)](#5-set-up-searxng-optional)
+  - [6. Run langbot](#6-run-langbot)
+- [Configuration](#configuration)
 - [Usage](#usage)
   - [Tests](#tests)
   - [Available tools](#available-tools)
@@ -138,12 +146,76 @@ includes the runtime deps plus `pytest`):
 pip install -r requirements-dev.txt
 ```
 
-`components/engines.py` additionally needs the SearXNG source on disk. Place it at one of
-`./searxng-src`, `~/searxng-src`, or `/usr/local/searxng/searxng-src`, or let the module
-clone it automatically on first use:
+## Fresh Start
+
+Get up and running with langbot in a few steps:
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/mcashdevel-ux/langbot.git
+cd langbot
+```
+
+### 2. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Set up the LLM
+
+langbot uses an **OpenAI-compatible API**. You have several options:
+
+| Option | Setup | Notes |
+|--------|-------|-------|
+| **Local LLM** | Run [ollama](https://ollama.com/) or [llama.cpp server](https://github.com/ggerganov/llama.cpp) locally | Default: `http://127.0.0.1:8080/v1` |
+| **OpenAI** | Set `OPENAI_API_KEY` + configure endpoint | Uses `api.openai.com/v1` |
+| **Other providers** | Set API key + configure `base_url` | Groq, Grok, custom endpoints |
+
+Configure via environment variables or `langbot.config.json`:
+
+```json
+{
+  "llm": {
+    "model": "your-model-name",
+    "api_key": "your-api-key",
+    "base_url": "http://localhost:8080/v1"
+  }
+}
+```
+
+### 4. Set up API keys (optional)
+
+Store API keys securely in the vault:
+
+```bash
+python langbot.py
+# Then use: /vault set KEY_NAME value
+```
+
+Or set as environment variables:
+
+```bash
+export OPENAI_API_KEY="your-key"
+export GROQ_API_KEY="your-key"
+# etc.
+```
+
+### 5. Set up SearXNG (optional)
+
+Required for web search. Clone the SearXNG source:
 
 ```bash
 git clone --depth 1 https://github.com/searxng/searxng ~/searxng-src
+```
+
+Or let langbot clone it automatically on first use.
+
+### 6. Run langbot
+
+```bash
+python langbot.py
 ```
 
 ## Configuration
