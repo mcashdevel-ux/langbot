@@ -13,6 +13,7 @@ import subprocess
 import logging
 import time
 import uuid
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -284,6 +285,22 @@ def execute_shell_command(command: str, cwd: str = "", timeout: int = 120) -> st
     Long output is previewed inline, with the whole of it saved to scratch and
     reachable via 'read_scratch'.
     """
+    # --- T4. Blast-radius pattern warning check ---
+    blast_patterns = app_config.get(
+        "tools.blast_radius_patterns",
+        [r"rm\s+-rf\b", r"rm\s+-r\s+-f\b", r"git\s+push\s+.*--force\b", r"git\s+push\s+.*-f\b", r"DROP\s+TABLE\b", r"DROP\s+DATABASE\b"]
+    )
+    is_destructive = False
+    matched_pattern = ""
+    for pat in blast_patterns:
+        if re.search(pat, command, re.I):
+            is_destructive = True
+            matched_pattern = pat
+            break
+
+    if is_destructive:
+        logger.warning("blast_radius: dangerous command execution flagged: %r (matched pattern: %r)", command, matched_pattern)
+
     try:
         result = subprocess.run(
             command, shell=True, capture_output=True, text=True,
@@ -295,14 +312,21 @@ def execute_shell_command(command: str, cwd: str = "", timeout: int = 120) -> st
             output += f"\n[STDERR]:\n{result.stderr}"
         if result.returncode:
             output += f"\n[Exit code: {result.returncode}]"
+        
+        warning_prefix = "⚠️ destructive command detected\n" if is_destructive else ""
+
         if not output:
-            return f"Command '{command}' executed successfully."
-        return _offload(output, prefix="shell", inline_chars=MAX_OUTPUT_CHARS,
-                        label="full output")
+            return warning_prefix + f"Command '{command}' executed successfully."
+        
+        full_result = _offload(output, prefix="shell", inline_chars=MAX_OUTPUT_CHARS,
+                               label="full output")
+        return warning_prefix + full_result
     except subprocess.TimeoutExpired:
-        return f"Timeout ({timeout}s): '{command}'"
+        warning_prefix = "⚠️ destructive command detected\n" if is_destructive else ""
+        return warning_prefix + f"Timeout ({timeout}s): '{command}'"
     except Exception as e:
-        return f"Execution failed: {e}"
+        warning_prefix = "⚠️ destructive command detected\n" if is_destructive else ""
+        return warning_prefix + f"Execution failed: {e}"
 
 @tool
 def read_any_file(file_path: str) -> str:
@@ -1021,6 +1045,11 @@ def _handle_slash(text: str, config: dict, app: object) -> bool:
         _repairs = _repair_stats()
         ui.kv("tool-call repairs", f"{_repairs['recovered_calls']} recovered, "
                                    f"{_repairs['cleaned_answers']} answers cleaned")
+        import components.routing as _routing
+        _rst = _routing.stats()
+        ui.kv("routing nudges", f"{_rst['nudges_permission']} permission, "
+                               f"{_rst['nudges_code_block']} code block")
+        ui.kv("routing drift telemetry", f"{_rst['near_miss_permission_hedges']} near-misses")
         ui.kv("distillation", _distill_llm.describe())
         ui.kv("summarizer", _summarize_llm.describe())
         ui.kv("warmup", _warmup.summary())
