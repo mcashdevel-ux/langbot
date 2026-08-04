@@ -645,6 +645,28 @@ def distill_knowledge(state: AgentState) -> AgentState:
         if isinstance(m, HumanMessage) and not is_nudge(m)
     )
     turn_msgs = state["messages"][last_human_idx:]
+
+    # --- T8. Recall Compliance Check ---
+    last_ai_msg = ai_msgs[-1]
+    last_ai_content = str(last_ai_msg.content or "")
+    memory_related_phrases = [
+        "you said", "you mentioned", "preference", "recalled", 
+        "remember", "as requested", "my knowledge", "long-term memory"
+    ]
+    if any(phrase in last_ai_content.lower() for phrase in memory_related_phrases):
+        # Check if 'recall' was called in this turn
+        called_tools = []
+        for m in turn_msgs:
+            for call in (getattr(m, "tool_calls", None) or []):
+                name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
+                if name:
+                    called_tools.append(name)
+        if "recall" not in called_tools:
+            logger.info(
+                "compliance check: final answer contains memory-referencing phrase "
+                "but 'recall' was not invoked this turn (prose: %r)", 
+                last_ai_content[:150]
+            )
     tool_results = [
         m for m in turn_msgs
         if getattr(m, "type", None) == "tool"
