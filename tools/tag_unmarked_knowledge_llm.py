@@ -110,18 +110,32 @@ def main():
         "Content-Type": "application/json",
     }
     
-    log_info("Fetching knowledge entries from Supabase...")
+    log_info("Fetching all knowledge entries from Supabase (paginated)...")
+    records = []
+    page_size = 1000
+    offset = 0
     try:
-        r = requests.get(
-            f"{url}/rest/v1/knowledge",
-            headers=headers,
-            params={"select": "id,fact,tags", "stale": "eq.false"},
-            timeout=30
-        )
-        if r.status_code != 200:
-            log_error(f"Failed to fetch records: HTTP {r.status_code} - {r.text}")
-            sys.exit(1)
-        records = r.json()
+        while True:
+            page_headers = dict(headers)
+            page_headers["Range-Unit"] = "items"
+            page_headers["Range"] = f"{offset}-{offset + page_size - 1}"
+            r = requests.get(
+                f"{url}/rest/v1/knowledge",
+                headers=page_headers,
+                params={"select": "id,fact,tags", "stale": "eq.false", "order": "id.asc"},
+                timeout=30
+            )
+            if r.status_code not in (200, 206):
+                log_error(f"Failed to fetch records: HTTP {r.status_code} - {r.text}")
+                sys.exit(1)
+            chunk = r.json()
+            if not chunk:
+                break
+            records.extend(chunk)
+            log_info(f"  Fetched {len(records)} records so far...")
+            if len(chunk) < page_size:
+                break
+            offset += page_size
     except Exception as e:
         log_error(f"Error connecting to Supabase: {e}")
         sys.exit(1)
