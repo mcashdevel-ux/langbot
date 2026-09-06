@@ -65,6 +65,9 @@ TRIGGERS = {
     "task_output": _TASKS,
     "task_kill": _TASKS,
     "read_scratch": r"scratch:|scratch id|full (?:output|file|page|diff)|show me the rest|page (?:through|more)",
+    "session_list": r"past session|session list|what (?:did|have) we (?:done|worked on)|last week|earlier session|old session|previous session",
+    "session_search": r"session_search|search (?:a|the|that) session|what happened in session|session [0-9a-f]{6,}|in that session",
+    "journal_search": r"journal_search|search the journal|current journal|recall (?:that|what) (?:was|got) (?:demoted|summarized|condensed)|lost during condensation",
 }
 
 _COMPILED = {name: re.compile(pattern, re.I) for name, pattern in TRIGGERS.items()}
@@ -198,7 +201,7 @@ def _embedding_tool_names(turn_text: str) -> "set[str]":
         model = _get_embeddings_model()
         _ensure_desc_vectors()
         query_vec = model.embed_query(turn_text.strip())
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.debug("tool_router: embedding lookup failed, falling back to regex only",
                      exc_info=True)
         return set()

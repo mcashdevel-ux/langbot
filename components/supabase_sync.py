@@ -59,8 +59,8 @@ def _get_vault_store():
             store = getattr(main, "_vault_store", None)
             if store and not store.is_locked():
                 return store
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 — vault lookup is best-effort
+        logger.debug("supabase_sync: vault store lookup failed", exc_info=True)
     return None
 
 
@@ -77,14 +77,14 @@ def _get_memory_collection():
     if _ms is not None:
         try:
             return _ms.get_collection()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning("supabase_sync: memory_store collection unavailable: %s", e)
     try:
         main = sys.modules.get("__main__") or sys.modules.get("langbot")
         if main:
             return getattr(main, "memory_collection", None)
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 — backward-compat lookup is best-effort
+        logger.debug("supabase_sync: memory_collection lookup failed", exc_info=True)
     return None
 
 
@@ -96,8 +96,8 @@ def _get_memory_dir() -> Path:
             d = getattr(main, "MEMORY_DIR", None)
             if d:
                 return Path(d)
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 — MEMORY_DIR lookup is best-effort
+        logger.debug("supabase_sync: MEMORY_DIR lookup failed", exc_info=True)
     return Path("memory")
 
 
@@ -168,7 +168,7 @@ class SupabaseSync:
                                 tags = [t for t in (meta.get("tags") or "").split(",") if t]
                                 facts.append((fact_text, tags))
                                 seen.add(fact_text)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning("supabase_sync: error reading local ChromaDB facts: %s", e)
 
         # 2. Backward compatibility: also read from knowledge.md if it exists, to capture any pre-existing facts
@@ -184,7 +184,7 @@ class SupabaseSync:
                         if content and content not in seen and not content.startswith(VAULT_SECRET_MARKER):
                             facts.append((content, []))
                             seen.add(content)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.warning("supabase_sync: error reading legacy knowledge file: %s", e)
                 
         return facts
@@ -210,7 +210,7 @@ class SupabaseSync:
                 _ms.store_memories_batch(facts, timestamps, source="supabase",
                                          tags_list=tags_list)
                 return True
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.warning("supabase_sync: memory_store batch store failed: %s", e)
 
             main = sys.modules.get("__main__") or sys.modules.get("langbot")
@@ -263,7 +263,7 @@ class SupabaseSync:
                     metadatas=metadatas,
                 )
             return True
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning("supabase_sync: error storing pulled facts batch to ChromaDB: %s", e)
             return False
 
@@ -275,7 +275,7 @@ class SupabaseSync:
             with open(kf, "a", encoding="utf-8") as f:
                 f.write("\n" + "\n".join(new_entries))
             return True
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning("supabase_sync: error writing knowledge file: %s", e)
             return False
 
@@ -302,7 +302,8 @@ class SupabaseSync:
                 for row in r.json() or []:
                     if row.get("fact"):
                         existing.add(row["fact"].strip())
-        except Exception:
+        except Exception:  # noqa: BLE001 — existing-facts lookup is best-effort
+            logger.debug("supabase_sync: existing-facts lookup failed", exc_info=True)
             existing = set()
 
         pushed = errors = 0
@@ -321,7 +322,7 @@ class SupabaseSync:
                     pushed += 1
                 else:
                     errors += 1
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 errors += 1
                 logger.warning("supabase_sync push error: %s", e)
 
@@ -373,7 +374,8 @@ class SupabaseSync:
                 ts = entry.get("created_at", "")
                 try:
                     ts = ts[:19].replace("T", " ") if ts else time.strftime("%Y-%m-%d %H:%M:%S")
-                except Exception:
+                except Exception:  # noqa: BLE001 — timestamp formatting is best-effort
+                    logger.debug("supabase_sync: timestamp formatting failed", exc_info=True)
                     ts = time.strftime("%Y-%m-%d %H:%M:%S")
                 new_lines.append(f"- [{ts}]: {fact}")
                 local_set.add(fact)
@@ -390,7 +392,8 @@ class SupabaseSync:
 
         except requests.exceptions.RequestException as e:
             return f"Supabase pull failed: {e}"
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — unexpected sync errors are user-facing
+            logger.debug("supabase_sync: pull failed", exc_info=True)
             return f"Sync pull failed: {e}"
 
     # ── Vault Secrets Sync ──
@@ -408,7 +411,8 @@ class SupabaseSync:
             else:
                 key = master_key.encode()
             return Fernet(key)
-        except Exception:
+        except Exception:  # noqa: BLE001 — key derivation is best-effort
+            logger.debug("supabase_sync: Fernet key derivation failed", exc_info=True)
             return None
 
     def push_secrets(self) -> str:
@@ -444,7 +448,8 @@ class SupabaseSync:
                     fact = row.get("fact", "")
                     if "||" in fact:
                         existing.add(fact.split("||", 1)[0].lstrip(VAULT_SECRET_MARKER))
-        except Exception:
+        except Exception:  # noqa: BLE001 — existing-secrets lookup is best-effort
+            logger.debug("supabase_sync: existing-secrets lookup failed", exc_info=True)
             existing = set()
 
         pushed = errors = 0
@@ -465,7 +470,7 @@ class SupabaseSync:
                 else:
                     errors += 1
                     logger.warning("Failed to push secret '%s': HTTP %s", name, r.status_code)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 errors += 1
                 logger.warning("Error pushing secret '%s': %s", name, e)
 
@@ -511,7 +516,7 @@ class SupabaseSync:
                         store.put(secret_name, decrypted)
                         os.environ[secret_name] = decrypted
                     pulled += 1
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     errors += 1
                     logger.warning("Error decrypting secret '%s': %s", secret_name, e)
 
@@ -519,7 +524,8 @@ class SupabaseSync:
 
         except requests.exceptions.RequestException as e:
             return f"Supabase pull_secrets failed: {e}"
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — unexpected sync errors are user-facing
+            logger.debug("supabase_sync: pull_secrets failed", exc_info=True)
             return f"Sync pull_secrets failed: {e}"
 
     def list_remote_secrets(self) -> str:
@@ -576,8 +582,8 @@ class SupabaseSync:
                     collection = client.get_or_create_collection("agent_longterm_memory")
             if collection:
                 lines.append(f"  Local ChromaDB facts: {collection.count()}")
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 — ChromaDB status is best-effort
+            logger.debug("supabase_sync: ChromaDB count failed", exc_info=True)
 
         kf = self._knowledge_file()
         if kf.exists():
@@ -587,8 +593,8 @@ class SupabaseSync:
                     if "]: " in line and "[pruned]" not in line
                 )
                 lines.append(f"  Local knowledge.md facts: {count}")
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 — knowledge file count is best-effort
+                logger.debug("supabase_sync: knowledge file count failed", exc_info=True)
 
         return "\n".join(lines)
 

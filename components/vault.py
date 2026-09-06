@@ -155,7 +155,7 @@ def _decrypt_gcm(master_key: bytes, b64: str) -> Optional[str]:
     except InvalidTag:
         logger.warning("Vault: integrity check failed (tampered or wrong key)")
         return None
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning(f"Vault decrypt error: {e}")
         return None
 
@@ -198,7 +198,7 @@ def _decrypt_legacy(master_key: bytes, blob: str) -> Optional[str]:
 
         plaintext = _sha256_ctr_crypt(enc_key, nonce, ciphertext)
         return plaintext.decode('utf-8')
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning(f"Vault decrypt error: {e}")
         return None
 
@@ -300,7 +300,7 @@ class VaultStore:
             try:
                 with open(MASTERKEY_FILE) as f:
                     key_data = json.load(f)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.warning(f"Failed to read master key: {e}")
                 return False
 
@@ -445,8 +445,8 @@ class VaultStore:
                 with open(MASTERKEY_FILE) as f:
                     data = json.load(f)
                 return data.get("type", "unknown")
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 — key type detection is best-effort
+            logger.debug("vault: failed to read key type", exc_info=True)
         return "none"
 
     # ── Persistence ──
@@ -461,7 +461,7 @@ class VaultStore:
                 "credentials": self._credentials,
             })
             _restrict_file_permissions(str(CREDENTIALS_FILE))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning(f"Failed to save credentials: {e}")
 
     def _save_metadata(self):
@@ -474,7 +474,7 @@ class VaultStore:
                 "credentials": list(self._metadata.values()),
             })
             _restrict_file_permissions(str(METADATA_FILE))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning(f"Failed to save metadata: {e}")
 
     def _load_credentials(self):
@@ -486,7 +486,7 @@ class VaultStore:
             with open(CREDENTIALS_FILE) as f:
                 data = json.load(f)
             self._credentials = data.get("credentials", {})
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning(f"Failed to load credentials: {e}")
             self._credentials = {}
 
@@ -503,7 +503,7 @@ class VaultStore:
                 name = entry.get("name", "")
                 if name:
                     self._metadata[name] = entry
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning(f"Failed to load metadata: {e}")
             self._metadata = {}
 
@@ -719,7 +719,7 @@ def start(agent):
                             setattr(cfg, cfg_field, values[env_name])
                             logger.info(f"Populated config.{cfg_field} from vault")
                             break
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning(f"Failed to populate config from vault: {e}")
 
 

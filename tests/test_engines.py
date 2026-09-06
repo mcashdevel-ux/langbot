@@ -231,6 +231,9 @@ class TestSearxSourceLookup:
             "web.searxng_source_dir": str(tmp_path / "nowhere"),
             "web.searxng_auto_clone": False,
         }.get(key, default))
+        # Prevent real on-disk searxng-src trees (e.g. ~/searxng-src on a dev
+        # machine) from being discovered by the candidate-path scan.
+        monkeypatch.setattr(engines.os.path, "isdir", lambda p: False)
 
         def no_clone(*args, **kwargs):  # pragma: no cover - must not be reached
             raise AssertionError("cloned despite web.searxng_auto_clone=false")

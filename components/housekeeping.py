@@ -166,15 +166,15 @@ def sweep(scratch_dir, checkpoint_db, active_thread_id=None) -> str:
     memories = {"removed": 0, "kept": 0}
     try:
         scratch = prune_scratch(scratch_dir)
-    except Exception as e:                   # never let a sweep break start-up
+    except Exception as e:                   # never let a sweep break start-up  # noqa: BLE001
         logger.warning("housekeeping: scratch sweep failed: %s", e, exc_info=True)
     try:
         checkpoints = prune_checkpoints(checkpoint_db, active_thread_id=active_thread_id)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning("housekeeping: checkpoint sweep failed: %s", e, exc_info=True)
     try:
         memories = prune_memories()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning("housekeeping: memory prune failed: %s", e, exc_info=True)
 
     summary = (

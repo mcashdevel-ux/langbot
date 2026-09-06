@@ -235,7 +235,7 @@ class MemoryWorker:
                 pass
             try:
                 self._process(batch)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 logger.exception("memory_worker: batch failed, skipping")
             finally:
                 for _ in batch:
@@ -246,7 +246,7 @@ class MemoryWorker:
         for job in batch:
             try:
                 entries.extend(self._distill(job))
-            except Exception:
+            except Exception:  # noqa: BLE001
                 logger.exception("memory_worker: job failed, skipping")
         if entries:
             self._store(entries)

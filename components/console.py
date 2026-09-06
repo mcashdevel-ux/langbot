@@ -10,13 +10,16 @@ import time
 import threading
 import shutil
 import re
+import logging
+
+logger = logging.getLogger(__name__)
 
 # ── Colorama (optional, graceful fallback) ──
 try:
     from colorama import Fore as _Fore, Style as _Style, init as _colorama_init
     _colorama_init()
     HAS_COLORAMA = True
-except Exception:
+except ImportError:
     HAS_COLORAMA = False
 
 if HAS_COLORAMA:
@@ -71,8 +74,8 @@ def _term_w() -> int:
     global _TERM_WIDTH
     try:
         _TERM_WIDTH = shutil.get_terminal_size((80, 20)).columns
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 — terminal size is best-effort
+        logger.debug("console: failed to get terminal size", exc_info=True)
     return _TERM_WIDTH
 
 
@@ -81,8 +84,8 @@ def _write(text: str):
         try:
             sys.stdout.write(text + '\n')
             sys.stdout.flush()
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 — output must not crash on pipe errors
+            logger.debug("console: stdout write failed", exc_info=True)
 
 
 def strip_ansi(text: str) -> str:
@@ -392,8 +395,8 @@ class GradientSpinner:
         try:
             sys.stdout.write('\r' + ' ' * (ansi_len(self.msg) + 4) + '\r')
             sys.stdout.flush()
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 — spinner cleanup is best-effort
+            logger.debug("console: spinner clear failed", exc_info=True)
 
     def update(self, msg: str):
         self.msg = msg
@@ -409,8 +412,8 @@ class GradientSpinner:
             try:
                 sys.stdout.write(f'\r  {color}{char}{Style.RESET_ALL} {self.msg}')
                 sys.stdout.flush()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 — spinner animation is best-effort
+                logger.debug("console: spinner write failed", exc_info=True)
             i += 1
             color_idx += 1
             time.sleep(0.03)
@@ -543,7 +546,8 @@ def _unicode_safe(text: str) -> str:
     if not isinstance(text, str):
         try:
             text = str(text)
-        except Exception:
+        except Exception:  # noqa: BLE001 — str() on exotic objects can fail
+            logger.debug("console: str() conversion failed", exc_info=True)
             return ''
     if sys.platform != 'win32':
         try:
@@ -585,7 +589,7 @@ try:
     from rich.markup import escape as _escape_markup
     _RICH_CONSOLE = _RichConsole(highlight=False)
     _HAS_RICH = True
-except Exception:
+except ImportError:
     _HAS_RICH = False
     _escape_markup = None
 
@@ -702,8 +706,8 @@ def panel(title: str = "", content: str = "", border_style: str = "green",
             try:
                 sys.stdout.write('\n'.join(result_lines) + '\n\n')
                 sys.stdout.flush()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 — output must not crash on pipe errors
+                logger.debug("console: stdout write failed", exc_info=True)
 
 
 # ═══════════════════════════════════════════════════════════════

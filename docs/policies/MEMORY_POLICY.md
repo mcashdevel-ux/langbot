@@ -13,6 +13,7 @@ The project root must remain clean — it contains only source code, configurati
 | Encrypted credentials | `./memory/vault/` | components/vault.py |
 | Vault master key | `./memory/vault/.masterkey` | components/vault.py (0600 perms) |
 | Tool-result scratchpad | `./memory/agent_scratch/` | components/scratch.py |
+| Session journals (event logs) | `./memory/sessions/` | components/journal.py |
 | Knowledge distillation log | `./memory/knowledge.md` | (user-created docs) |
 | Fact confidence scores | `agent_longterm_memory` collection metadata | `components/memory_store.py` (Chroma `confidence` column, 0.0–1.0) |
 
@@ -47,6 +48,7 @@ Environment variables take precedence over the config file.
 - `AGENT_SCRATCH_DIR` — defaults to `./memory/agent_scratch` (also `paths.scratch_dir`)
 - `AGENT_CHROMA_DIR` — defaults to `./memory/agent_memory_chroma` (also `paths.chroma_dir`)
 - `AGENT_TASKS_DIR` — defaults to `./memory/agent_tasks` (also `paths.tasks_dir`)
+- `AGENT_SESSIONS_DIR` — defaults to `./memory/sessions` (also `paths.sessions_dir`)
 - `LANGBOT_CONFIG` — path to the config file to load
 - `LANGBOT_VAULT_PASSWORD` — optional, for vault key wrapping
 

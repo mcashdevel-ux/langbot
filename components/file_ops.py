@@ -15,6 +15,9 @@ so they can be unit-tested without importing the heavy top-level agent module.
 import json
 import os
 import subprocess
+import logging
+
+logger = logging.getLogger(__name__)
 
 from .config import config
 from .scratch import offload
@@ -180,7 +183,8 @@ def patch_file(file_path: str, old_text: str, new_text: str) -> str:
             except ImportError:
                 import tomli as tomllib
             tomllib.loads(new_content)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — toml parse errors are user-facing
+            logger.debug("file_ops: TOML parse failed for %s", path, exc_info=True)
             try:
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(content)
@@ -193,7 +197,8 @@ def patch_file(file_path: str, old_text: str, new_text: str) -> str:
             yaml.safe_load(new_content)
         except ImportError:
             pass
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — yaml parse errors are user-facing
+            logger.debug("file_ops: YAML parse failed for %s", path, exc_info=True)
             try:
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(content)

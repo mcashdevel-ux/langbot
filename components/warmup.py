@@ -64,7 +64,7 @@ class Warmup:
                 self._set(name, RUNNING)
                 try:
                     self._jobs[name]()
-                except Exception as e:  # one broken job must not strand the rest
+                except Exception as e:  # one broken job must not strand the rest  # noqa: BLE001
                     self._set(name, FAILED, e)
                     logger.warning("warmup: %s failed: %s", name, e, exc_info=True)
                 else:

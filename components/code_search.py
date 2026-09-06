@@ -11,7 +11,7 @@ import subprocess
 
 from .config import config
 from .scratch import save_to_scratch
-from .utils import truncate
+from .truncate import maybe_truncate
 
 # Matches shown inline; larger result sets are saved whole to scratch and paged
 # through with read_scratch.
@@ -25,7 +25,7 @@ def _format_matches(pattern: str, lines: list[str]) -> str:
     if not lines:
         return f"No matches for '{pattern}'."
     if len(lines) <= GREP_INLINE_LINES:
-        return truncate("\n".join(lines))
+        return maybe_truncate("\n".join(lines), prefix="grep")
     sid = save_to_scratch("\n".join(lines), prefix="grep")
     preview = "\n".join(lines[:GREP_INLINE_LINES])
     return (f"{len(lines)} matches for '{pattern}' (showing first "
