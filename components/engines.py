@@ -80,7 +80,7 @@ def _ensure_searx_initialized():
                 check=True, capture_output=True, timeout=120
             )
             logger.info("SearXNG source cloned successfully")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — engine response parsing is best-effort  # noqa: BLE001
             raise RuntimeError(f"Failed to clone SearXNG source: {e}") from e
     
     if searx_src not in sys.path:
@@ -345,7 +345,7 @@ def search_engine(
     # Step 1: Build request
     try:
         engine.request(query, params)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"Engine '{engine_name}' failed to build request: {e}") from e
     
     if not params.get("url"):
@@ -355,7 +355,7 @@ def search_engine(
     # Step 2: Make HTTP request
     try:
         resp = _make_http_request(params)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"HTTP request failed for engine '{engine_name}': {e}") from e
     
     # Step 3: Wrap response — need to cast to SXNG_Response for some engines
@@ -627,7 +627,7 @@ def search_multi(
             done += 1
             try:
                 engine_results = future.result()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 logger.warning("search_multi: engine %s failed, skipping", name,
                                exc_info=True)
                 if progress_callback:
@@ -667,5 +667,5 @@ if __name__ == "__main__":
             print(f"\n{name}: {len(results)} results")
             for r in results:
                 print(f"  - {r['title'][:60]}")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — CLI smoke test, print is fine
             print(f"\n{name}: ERROR — {e}")

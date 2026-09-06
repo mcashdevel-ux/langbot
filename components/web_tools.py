@@ -12,7 +12,10 @@ search/browse tasks: full pages never get force-fed into the chat history.
 import re
 import json
 import time
+import logging
 import requests
+
+logger = logging.getLogger(__name__)
 
 from .config import config
 from .engines import search_engine, search_multi, _categorize_query, _AUTO_ENGINE_SETS
@@ -58,7 +61,8 @@ def search_web(query: str, engine: str = "duckduckgo", max_results: int = 5) -> 
                     results = res
                     used_engine = eng
                     break
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — engine failures are non-fatal
+                logger.debug("web_tools: engine %s failed: %s", eng, e)
                 if eng == engine:
                     last_error = e
                 continue
@@ -104,7 +108,8 @@ def fetch_url(url: str) -> str:
                 continue
             resp.raise_for_status()
             break
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — fetch failures are retried
+            logger.debug("web_tools: fetch attempt %d failed for %s: %s", i, url, e)
             if i == attempts - 1:
                 return f"fetch error for {url}: {e}"
             time.sleep(1)

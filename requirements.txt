@@ -21,6 +21,9 @@ cryptography>=43.0.0
 httpx>=0.27.0
 requests>=2.32.0
 
+# Config & Secrets
+python-dotenv>=1.0.0
+
 # CLI & Formatting
 rich>=13.0.0
 colorama>=0.4.6

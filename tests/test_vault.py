@@ -35,6 +35,9 @@ def vault_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(vault, "MASTERKEY_FILE", vdir / ".masterkey")
     monkeypatch.setattr(vault, "CREDENTIALS_FILE", vdir / "credentials.json")
     monkeypatch.setattr(vault, "METADATA_FILE", vdir / "metadata.json")
+    # Prevent a leaked LANGBOT_VAULT_PASSWORD (e.g. set at module level by
+    # another test file) from turning raw-key tests into password-wrapped ones.
+    monkeypatch.delenv(vault.VAULT_PASSWORD_ENV, raising=False)
     return vdir
 
 

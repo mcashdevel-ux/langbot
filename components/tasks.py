@@ -18,6 +18,9 @@ import subprocess
 import sys
 import threading
 import time
+import logging
+
+logger = logging.getLogger(__name__)
 import uuid
 from dataclasses import dataclass
 from typing import Optional
@@ -80,7 +83,7 @@ class BackgroundTaskManager:
             popen_kwargs["start_new_session"] = True  # own process group for clean kill
         try:
             proc = subprocess.Popen(command, **popen_kwargs)
-        except Exception:
+        except Exception:  # noqa: BLE001 — cleanup then re-raise
             log.close()
             raise
         task = Task(

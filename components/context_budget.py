@@ -69,7 +69,7 @@ def _get_encoding():
             import tiktoken
 
             _encoding = tiktoken.get_encoding("cl100k_base")
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.debug("context_budget: tiktoken unavailable, estimating tokens")
             _encoding = None
     return _encoding
@@ -225,7 +225,7 @@ def compact(messages, summarize, previous_summary: str = "",
         summary = summarize(
             summary_prompt(older, previous_summary, preserve_facts)
         ).strip()
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning("context_budget: summarization failed, keeping history",
                        exc_info=True)
         return [], list(messages), previous_summary

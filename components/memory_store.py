@@ -97,8 +97,8 @@ def get_embeddings(announce: bool = True):
 
             transformers.logging.set_verbosity_error()
             transformers.logging.disable_progress_bar()
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 — optional verbosity config
+            logger.debug("memory_store: transformers verbosity config failed", exc_info=True)
         from langchain_huggingface import HuggingFaceEmbeddings
 
         with suppress_native_output():
@@ -656,7 +656,7 @@ def list_tags() -> list:
                     if tag:
                         counter[tag] += 1
         return counter.most_common()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning(f"Failed to list tags: {e}")
         return []
 
@@ -670,6 +670,6 @@ def delete_memory(mem_id: str) -> bool:
             with _write_lock:
                 collection.delete(ids=[mem_id])
             return True
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 — ChromaDB delete is best-effort
+        logger.debug("memory_store: delete failed for %s", mem_id, exc_info=True)
     return False

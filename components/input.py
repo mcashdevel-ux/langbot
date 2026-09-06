@@ -9,7 +9,10 @@ import sys
 import time
 import re
 import atexit
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from .console import (
     Fore, Style, _write, _term_w, _unicode_safe,
@@ -58,8 +61,8 @@ def _drain_stdin_unix() -> str:
                 lines.append(line.rstrip("\n\r"))
         finally:
             fcntl.fcntl(fd, fcntl.F_SETFL, old_flags)
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 — non-blocking read is best-effort
+        logger.debug("input: non-blocking read failed", exc_info=True)
     return "\n".join(lines)
 
 
@@ -81,8 +84,8 @@ def _drain_stdin_windows() -> str:
                     break
             else:
                 time.sleep(0.005)
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 — stdin polling is best-effort
+        logger.debug("input: stdin polling failed", exc_info=True)
     return "\n".join(lines)
 
 
@@ -110,6 +113,7 @@ def setup_readline(histfile=None, history_length: int = 2000):
         "/knowledge", "/health", "/ls", "/save", "/config",
         "/vault list", "/vault status", "/tasks", "/kill", "/log",
         "/tags", "/forget", "/history", "/compact",
+        "/sessions", "/session",
     ]
 
     def _completer(text, state):
@@ -164,7 +168,7 @@ def read_input(prompt: str = "") -> str:
         try:
             sys.stdout.write(f"\r  {Fore.YELLOW}\U0001f4cb{Style.RESET_ALL} {collapsed}\n")
             sys.stdout.flush()
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 — clipboard display is best-effort
+            logger.debug("input: clipboard display failed", exc_info=True)
 
     return result.strip()[:5000]

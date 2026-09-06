@@ -17,6 +17,20 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Load .env (API keys, base URLs, etc.) before anything reads os.environ —
+# the config layer, vault bootstrap, and LLM construction all consult it.
+
+# python-dotenv is optional: if it is missing, the agent still runs with
+# whatever is already in the environment (and a one-line warning).
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    logging.getLogger(__name__).warning(
+        "python-dotenv not installed — .env file (if any) is not loaded; "
+        "install it via 'pip install python-dotenv' or set env vars directly"
+    )
+
 logger = logging.getLogger(__name__)
 
 # Send every component's log records to ./memory/langbot.log before anything can
@@ -28,7 +42,7 @@ _setup_logging()
 
 from langchain_core.tools import tool
 from langchain_core.utils.function_calling import convert_to_openai_tool
-from langchain_core.messages import HumanMessage, RemoveMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, START, END, MessagesState
 from langgraph.prebuilt import ToolNode, tools_condition
@@ -46,6 +60,14 @@ from components.web_tools import search_web as _search_web, fetch_url as _fetch_
 from components.scratch import offload as _offload, read_scratch as _read_scratch
 from components.safety import catastrophic_reason as _catastrophic_reason
 from components.utils import MAX_OUTPUT_CHARS, truncate
+from components.truncate import maybe_truncate as _maybe_truncate
+from components.journal import (
+    Event as _JournalEvent,
+    Journal as _Journal,
+    heuristic_title as _heuristic_title,
+    journals_dir as _journals_dir,
+    resolve_session_key as _resolve_session_key,
+)
 # Aliased: `config` is the per-thread graph config in this module's REPL helpers.
 from components.config import CONFIG_ENV_VAR, CONFIG_FILENAME, config as app_config
 from components.memory_store import (
@@ -86,10 +108,20 @@ from components.tool_router import select_tools as _select_tools, register as _r
 from tools.plugins import discover_plugins
 from components.routing import (
     RECURSION_LIMIT,
+    NUDGE_MARKER,
     is_nudge,
     nudge_agent,
     route_agent,
     split_repeated_calls,
+)
+from components.stuck import StuckDetector as _StuckDetector
+
+from components.reflex import ReflexStore as _ReflexStore
+from components.session_tools import (
+    journal_search as _journal_search,
+    session_list as _session_list,
+    session_search as _session_search,
+    set_current_journal as _set_current_journal,
 )
 from components.tool_call_repair import repair_message, stats as _repair_stats
 
@@ -108,9 +140,11 @@ from components.vault import (
 # Configuration — every value below has a working default, so ./langbot.config.json
 # (see components/config.py for the search order) is entirely optional.
 # ------------------------------------------------------------------------------
-BASE_URL = app_config.get("llm.base_url", "http://127.0.0.1:8080/v1")
-LLM_MODEL = app_config.get("llm.model", "local-model")
-LLM_TEMPERATURE = app_config.get("llm.temperature", 0.1)
+BASE_URL = app_config.get("llm.base_url", "http://127.0.0.1:8080/v1",
+                             env="LLM_BASE_URL")
+LLM_MODEL = app_config.get("llm.model", "local-model", env="LLM_MODEL")
+LLM_API_KEY = app_config.get("llm.api_key", "not-needed", env="LLM_API_KEY")
+LLM_TEMPERATURE = app_config.get("llm.temperature", 0.1, env="LLM_TEMPERATURE")
 LLM_MAX_RETRIES = app_config.get("llm.max_retries", 10)
 THINKING_MODE = app_config.get("llm.thinking_mode", "auto")
 SQLITE_DB_PATH = app_config.get("paths.checkpoint_db", "./memory/agent_checkpoints.db")
@@ -121,13 +155,18 @@ SQLITE_DB_PATH = app_config.get("paths.checkpoint_db", "./memory/agent_checkpoin
 # ------------------------------------------------------------------------------
 _VAULT_ENV_LOADED = _vault_bootstrap()
 
+# Procedural reflex store (Track D of docs/neo-port-plan.md) — deterministic
+# when-X → do-Y rules matched before the LLM is ever called.  Rules persist
+# under ./memory/reflexes.json (see components/reflex.py).
+_reflex_store = _ReflexStore()
+
 # ------------------------------------------------------------------------------
 # 1. LLM & Embeddings
 # ------------------------------------------------------------------------------
 llm = ChatOpenAI(
     model=LLM_MODEL,
     base_url=BASE_URL,
-    api_key="not-needed",
+    api_key=LLM_API_KEY,
     temperature=LLM_TEMPERATURE,
     max_retries=LLM_MAX_RETRIES,
 )
@@ -191,6 +230,139 @@ _summarize_llm = FallbackLLM(
                             app_config.get("distill.timeout", 30.0)),
 )
 
+# ------------------------------------------------------------------------------
+# 2c. Durable Journal (Track B) — audit/observability layer
+# ------------------------------------------------------------------------------
+# The journal is an append-only event log per session under ./memory/sessions/.
+# It is *not* the source of truth (the LangGraph checkpoint DB is); it exists
+# so past sessions can be browsed by title/activity and searched by keyword, even
+# after housekeeping prunes the checkpoint rows.  Journaling is best-effort:
+# it must never break the agent loop, so every append swallows its exceptions.
+
+_current_journal = None
+_turn = 0
+
+
+def _journal_event(type_: str, source: str = "system", **data) -> None:
+    """Append an event to the current session's journal. Best-effort: journaling
+    must never break the agent loop, so exceptions are swallowed.."""
+    j = _current_journal
+    if j is None:
+        return
+    try:
+        j.log.append(_JournalEvent(type=type_, data=data, source=source, turn=_turn))
+    except Exception:  # noqa: BLE001 — journaling must never break the loop
+        logger.debug("journal: append failed", exc_info=True)
+
+
+def _journal_set_title(text: str) -> None:
+    """Set the session title from the first user message (no LLM call.."""
+    j = _current_journal
+    if j is None:
+        return
+    try:
+        if j.meta().get("title") is None:
+            j.set_title(_heuristic_title(text))
+    except Exception:  # noqa: BLE001 — journaling must never break the loop
+        logger.debug("journal: set_title failed", exc_info=True)
+
+
+def _start_journal(thread_id: str) -> None:
+    """Create (or replace) the journal for a thread and make it current..
+    Called from main() at start and from /new when the thread changes.."""
+    global _current_journal
+    try:
+        key, meta_extra = _resolve_session_key()
+        _current_journal = _Journal.create(name=f"session:{thread_id}",
+                                            encrypt_key=key,
+                                            meta_extra=meta_extra)
+    except Exception:  # noqa: BLE001 — journaling must never break the loop
+        logger.debug("journal: create failed", exc_info=True)
+        _current_journal = None
+
+
+def _format_sessions(limit: int = 20) -> str:
+    """List past sessions, newest by activity — the /sessions slash command."""
+    try:
+        metas = _Journal.list()
+    except Exception as e:  # noqa: BLE001 — listing is user-facing
+        return f"[error listing sessions] {e}"
+    if not metas:
+        return "(no sessions found)"
+    lines = []
+    for m in metas[:limit]:
+        sid = m.get("id", "?")
+        title = m.get("title") or "(untitled)"
+        created = m.get("created_at", "?")
+        name = m.get("name", "?")
+        n_events = 0
+        finished = False
+        try:
+            j = _Journal.load(sid)
+            evs = j.events()
+            n_events = len(evs)
+            finished = any(e.type == "finish" for e in evs[-5:])
+        except Exception:  # noqa: BLE001 — a corrupt session must not break the list
+            pass
+        status = "done" if finished else "active/incomplete"
+        lines.append(f"  {sid}  {title[:50]:50s}  {created}  "
+                     f"{n_events:5d} events  [{status}]  ({name})")
+    return (f"Sessions ({len(metas)} total, showing {min(limit, len(metas))}):\n"
+            + "\n".join(lines))
+
+
+def _search_session(session_id: str, query: str, n: int = 10) -> str:
+    """Search a past session's events by keyword — the /session slash command..
+    Handles encrypted sessions transparently (the passphrase from
+    LANGBOT_SESSION_ENCRYPT re-derives the key from the session's stored salt)..
+    """
+    try:
+        key, _ = _resolve_session_key(journal_id=session_id)
+        j = _Journal.load(session_id, encrypt_key=key)
+        evs = j.events()
+    except FileNotFoundError:
+        return f"Session {session_id} not found"
+    except Exception as e:  # noqa: BLE001 — search errors are user-facing
+        return f"[error reading session] {e}"
+    query_lower = query.lower()
+    matches = []
+    for ev in evs:
+        d = ev.data if isinstance(ev.data, dict) else {}
+        text = " ".join(str(v) for v in d.values()
+                        if isinstance(v, (str, int, float)))
+        if query_lower in text.lower() or query_lower in ev.type.lower():
+            matches.append(ev)
+    if not matches:
+        return f"No events matching '{query}' in session {session_id}"
+    lines = []
+    for ev in matches[:n]:
+        d = ev.data if isinstance(ev.data, dict) else {}
+        seq = ev.seq
+        if ev.type == "user_message":
+            content = d.get("text", "")[:200]
+        elif ev.type == "tool_result":
+            content = f"[{d.get('tool', '?')}] {str(d.get('preview', ''))[:200]}"
+        elif ev.type == "llm_response":
+            content = d.get("content", "")[:200]
+            calls = d.get("tool_calls", [])
+            if calls:
+                names = [c.get("function", {}).get("name", "?") for c in calls]
+                content += f" calls={names}"
+        elif ev.type == "agent_message":
+            content = d.get("text", "")[:200]
+        elif ev.type == "condensation":
+            kind = d.get("kind", "?")
+            summary = d.get("summary", "")
+            content = f"[{kind}] {summary[:200]}" if summary else f"[{kind}]"
+        else:
+            content = str(d)[:200]
+        lines.append(f"  [{seq}] {ev.type}: {content}")
+    header = f"Session {session_id}: {len(matches)} matches for '{query}'"
+    if len(matches) > n:
+        header += f" (showing first {n})"
+    return header + "\n" + "\n".join(lines)
+
+
 def _extract_summary_facts(summary_text: str) -> str:
     """Extract key facts from an existing summary before recompacting it.
 
@@ -215,7 +387,7 @@ def _extract_summary_facts(summary_text: str) -> str:
     try:
         response = _summarize_llm.invoke(prompt)
         return (response.content or "").strip()
-    except Exception:
+    except Exception:  # noqa: BLE001 — fact extraction is best-effort
         logger.warning("compact: fact extraction failed, recompacting "
                        "without preserved facts")
         return ""
@@ -241,7 +413,8 @@ def remember(fact: str, tags: "list[str] | None" = None) -> str:
         mem_id = _store_memory(fact, tags=tags)
         stored = "Memory stored" if _memory_count() > before else "Already remembered"
         return f"{stored} (id {mem_id}): {truncate(fact, 200)}"
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — memory store errors are user-facing
+        logger.debug("langbot: store_memory failed", exc_info=True)
         return f"Failed to store memory: {e}"
 
 @tool
@@ -272,7 +445,8 @@ def recall(query: str, n: int = 3) -> str:
             + "]"
             for m in memories
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — recall errors are user-facing
+        logger.debug("langbot: recall failed", exc_info=True)
         return f"Failed to recall memories: {e}"
 
 @tool
@@ -331,7 +505,8 @@ def execute_shell_command(command: str, cwd: str = "", timeout: int = 120) -> st
     except subprocess.TimeoutExpired:
         warning_prefix = "⚠️ destructive command detected\n" if is_destructive else ""
         return warning_prefix + f"Timeout ({timeout}s): '{command}'"
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — shell errors are user-facing
+        logger.debug("langbot: shell command failed: %s", command, exc_info=True)
         warning_prefix = "⚠️ destructive command detected\n" if is_destructive else ""
         return warning_prefix + f"Execution failed: {e}"
 
@@ -377,7 +552,9 @@ def git_diff(file_path: str = ".", cached: bool = False) -> str:
 def find_in_files(pattern: str, path: str = ".") -> str:
     """Search for a text pattern across source/text files (recursive).
 
-    Result sets over 20 matches are paged via 'read_scratch'.
+    Result sets over 12 matches are paged via 'read_scratch'; a small set
+    whose lines are huge is head+tail truncated with the full output saved to a
+    file (see the notice in the result).
     """
     return _find_in_files(pattern, path)
 
@@ -456,13 +633,31 @@ def vault(action: str, name: str = "", value: str = "") -> str:
     """
     return _vault_run(action, name=name, value=value)
 
+
+@tool
+def reflex_distill(trigger: str, command: str) -> str:
+    """Store a procedural reflex rule: when the user's words match ``trigger``,
+    run ``command`` directly, without an LLM call.
+
+    Use this after a successful shell command the user is likely to repeat
+    (e.g. "check disk space" → "df -h").  The rule fires on keyword overlap
+    (≥ 2 trigger words present in the user message), best-first, and is
+    disabled via the /reflex slash command.  Returns the rule's id, or an
+    error message if either field is empty."""
+    rid = _reflex_store.distill(trigger, command)
+    if not rid:
+        return ("Reflex not stored: both 'trigger' and 'command' are required "
+                "(trigger = the words that should fire it, e.g. 'check disk space').")
+    return f"Reflex stored: id={rid} trigger={trigger!r} command={command!r}"
+
 tools = [
     execute_shell_command, read_any_file, write_any_file,
     patch_file, batch_patch, git_diff,
     find_in_files, read_many_files, glob_list,
     task_start, task_list, task_status, task_output, task_kill,
     search_web, fetch_url, read_scratch,
-    remember, recall, vault,
+    remember, recall, vault, reflex_distill,
+    tool(_session_list), tool(_session_search), tool(_journal_search),
 ]
 
 # Dynamically loaded plugin tools (tools/plugins/*.py).
@@ -502,7 +697,7 @@ def _tool_schema_tokens(selected) -> int:
     if key not in _schema_tokens:
         try:
             payload = json.dumps([convert_to_openai_tool(t) for t in selected])
-        except Exception:
+        except Exception:  # noqa: BLE001 — schema rendering is best-effort
             logger.debug("context: could not render tool schemas", exc_info=True)
             return 0
         _schema_tokens[key] = _ctx.estimate_tokens(payload)
@@ -516,6 +711,9 @@ _ARG_ALIASES = {
                "limit": "n", "top_k": "n", "k": "n"},
     "remember": {"text": "fact", "memory": "fact", "content": "fact", "facts": "fact",
                  "tag": "tags", "labels": "tags", "categories": "tags"},
+    "reflex_distill": {"keywords": "trigger", "phrase": "trigger", "when": "trigger",
+                        "rule": "trigger", "cmd": "command", "shell": "command",
+                        "action": "command", "procedure": "command"},
 }
 
 # ------------------------------------------------------------------------------
@@ -535,6 +733,9 @@ system_prompt = SystemMessage(content=(
     "- Prefer patch_file over rewriting a file; use task_start for anything long-running.\n"
     "- Call recall before answering anything that depends on what you already know "
     "(preferences, paths, past decisions); remember only durable facts.\n"
+    "- After a successful shell command the user is likely to repeat, store a "
+    "procedural rule with reflex_distill (trigger = the words that should fire it, "
+    "e.g. 'check disk space'; command = the exact shell command).\n"
     "- Long results are saved to a scratch file: read the rest with "
     "read_scratch(scratch_id, offset).\n"
     "Example — 'is the api key set?' is answered by calling vault with "
@@ -718,6 +919,53 @@ def _summarize(prompt: str) -> str:
     return (response.content or "") if hasattr(response, 'content') else str(response)
 
 
+# ------------------------------------------------------------------------------
+# 7a. Procedural Reflex Node (Track D of docs/neo-port-plan.md)
+# ------------------------------------------------------------------------------
+_REFLEX_ANSWER_MARKER = "[REFLEX]"
+
+
+def reflex_node(state: AgentState):
+    """Deterministic fast-path: if the user's latest message matches a stored
+    reflex rule, run its command via the same ``execute_shell_command`` path
+    (catastrophic denylist and blast-radius warning included) and return the
+    result as the turn's answer — no LLM call, no tools round-trip.
+
+    The command's output is wrapped in a marker so the REPL renders it as
+    a normal answer panel (and downstream routing treats it as a final
+    answer, not a tool result).  A match is journaled for audit; ``use()``
+    increments the rule's counter.  No match → return {} so the graph falls
+    through to ``compact``/``agent`` as usual."""
+    messages = state["messages"]
+    if not messages:
+        return {}
+    last = messages[-1]
+    if not isinstance(last, HumanMessage) or is_nudge(last):
+        return {}
+    query = str(getattr(last, "content", "") or "")
+    hits = _reflex_store.match(query)
+    if not hits:
+        return {}
+    rule = hits[0]
+    _reflex_store.use(rule["id"])
+    _journal_event("reflex", rule_id=rule["id"], trigger=rule["trigger"],
+                   command=rule["command"], source="system")
+    logger.info("reflex: firing rule %s (%r) for %r", rule["id"], rule["trigger"], query[:120])
+    output = execute_shell_command.invoke({"command": rule["command"]})
+    answer = (f"{_REFLEX_ANSWER_MARKER} {rule['trigger']} → "
+                f"`{rule['command']}`\n\n{output}")
+    return {"messages": [AIMessage(content=answer)]}
+
+
+def route_reflex(state: AgentState) -> str:
+    """After the reflex node::a match ends the turn (no LLM call);;no match
+    falls through to ``compact`` as usual."""
+    last = state["messages"][-1]
+    if getattr(last, "type", None) == "ai" and _REFLEX_ANSWER_MARKER in str(getattr(last, "content", "")):
+        return "distill"
+    return "compact"
+
+
 def compact_context(state: AgentState):
     """Fold the oldest messages into the rolling summary when over budget.
 
@@ -746,6 +994,8 @@ def compact_context(state: AgentState):
     if not removable:
         return {}
     _ctx.record_compaction(len(removable), _ctx.total_tokens(removable))
+    _journal_event("condensation", kind="summary", summary=new_summary,
+                    dropped=len(removable), source="system")
     return {
         "messages": [RemoveMessage(id=m.id) for m in removable],
         "summary": new_summary,
@@ -780,21 +1030,91 @@ def tools_node(state: AgentState):
         if getattr(msg, "type", None) == "tool" and getattr(msg, "name", None) != "vault" \
                 and isinstance(getattr(msg, "content", None), str):
             msg.content = _vault_redact(msg.content)
+            # Kernel-level head+tail fallback (Track A): any tool result that did
+            # not self-offload to scratch (e.g. a plugin tool, glob_list on a
+            # huge dir) is caught here instead of being dumped whole into the
+            # message state.  Vault output is exempted above — a credential value
+            # must never be written to a plaintext file under ./memory/truncated/.
+            msg.content = _maybe_truncate(
+                msg.content, prefix=getattr(msg, "name", "tool") or "tool"
+            )
     if blocked:
         result = {**result, "messages": list(result.get("messages", [])) + blocked}
     return result
+# Stuck-detection constants (Track C of docs/neo-port-plan.md).  The detector
+# folds the whole current turn's messages and fires on five patterns (see
+# components/stuck.py).  A ``halt`` verdict ends the turn with a stuck
+# directive ((mirroring neo's ``(stuck: ...)`` finish);;a ``nudge`` verdict
+# injects a softer "change approach" watchdog message,, capped at 3 per turn
+# like the existing nudge budget,, then escalates to halt..
+STUCK_HALT_MARKER = "[STUCK]"
+MAX_STUCK_NUDGES = app_config.get("routing.max_stuck_nudges", 3)
+_STUCK_DETECTOR = _StuckDetector()
+
+
+def _stuck_directive(verdict, ignored: int) -> str:
+    """Build the corrective HumanMessage for a stuck verdict."""
+    if verdict.severity == "halt":
+        text = (f"{verdict.detail} — stop now and answer from what you "
+                 f"already have")
+    else:
+        text = (f"{verdict.detail} — change approach,, explain the blocker,, "
+                 f"or finish")
+    if ignored >= 1:
+        text += (" — you have been told this before; change approach,, "
+                 "explain the blocker,, or finish")
+    return f"{NUDGE_MARKER} {STUCK_HALT_MARKER} {text}"
+
+
+def stuck_node(state: AgentState):
+    """Run stuck detection after each tool round ((between ``tools`` and
+    ``compact``).  On a verdict,, inject a corrective HumanMessage ((the
+    ``stuck`` node's output is rendered like ``nudge``'s,, and the directive
+    counts as a nudge for the turn's budget via ``NUDGE_MARKER``).  A ``halt``
+    verdict ((or 3 ignored nudges)) escalates to a terminal stuck message
+    routed straight to ``distill``/END — no 4th call..
+    """
+    messages = state["messages"]
+    verdict = _STUCK_DETECTOR.check(messages)
+    if verdict is None:
+        return {}
+    ignored = sum(1 for m in messages
+                  if is_nudge(m) and STUCK_HALT_MARKER in str(getattr(m, "content", "")))
+    if verdict.severity == "halt" or ignored >= MAX_STUCK_NUDGES:
+        _journal_event("stuck", pattern=verdict.pattern, detail=verdict.detail,
+                       severity="halt", ignored=ignored, source="system")
+        return {"messages": [HumanMessage(content=_stuck_directive(verdict, ignored))],
+                "stuck_halt": True}
+    _journal_event("watchdog", pattern=verdict.pattern, detail=verdict.detail,
+                   severity="nudge", ignored=ignored, source="system")
+    return {"messages": [HumanMessage(content=_stuck_directive(verdict, ignored))]}
+
+
+def route_stuck(state: AgentState) -> str:
+    """After the stuck node::a terminal halt directive goes to ``distill``
+    ((end the turn);;a soft nudge ((or no verdict)) goes back through
+    ``compact`` to ``agent``."""
+    last = state["messages"][-1]
+    if is_nudge(last) and STUCK_HALT_MARKER in str(getattr(last, "content", "")):
+        return "distill"
+    return "compact"
 
 builder = StateGraph(AgentState)
+builder.add_node("reflex", reflex_node)
 builder.add_node("compact", compact_context)
 builder.add_node("agent", agent)
 builder.add_node("tools", tools_node)
 builder.add_node("nudge", nudge_agent)
 builder.add_node("distill", distill_knowledge)
 
-builder.add_edge(START, "compact")
+builder.add_edge(START, "reflex")
+builder.add_conditional_edges("reflex", route_reflex, ["distill", "compact"])
 builder.add_edge("compact", "agent")
 builder.add_conditional_edges("agent", route_agent, ["tools", "nudge", "distill"])
-builder.add_edge("tools", "compact")
+builder.add_node("stuck", stuck_node)
+builder.add_edge("tools", "stuck")
+builder.add_conditional_edges("stuck", route_stuck, ["distill", "compact"])
+builder.add_edge("compact", "agent")
 builder.add_edge("nudge", "agent")
 builder.add_edge("distill", END)
 
@@ -866,6 +1186,10 @@ def _stream_turn(app, config, user_input: str) -> None:
     spinner.start()
     spinner_running = True
     answered = False
+    last_final = ""
+    # Point the session tools at this turn's journal (cleared on exit so a
+    # stale journal can't leak across turns).
+    _set_current_journal(_current_journal)
     try:
         for chunk in app.stream(
             {"messages": [HumanMessage(content=user_input)]},
@@ -878,11 +1202,35 @@ def _stream_turn(app, config, user_input: str) -> None:
                         "stream chunk: node=%s messages=%s", node,
                         [getattr(m, "type", None) for m in (update or {}).get("messages", [])],
                     )
-                if node not in ("agent", "tools") or not update:
+                if node not in ("agent", "tools", "nudge", "stuck", "reflex") or not update:
                     continue
                 for msg in update.get("messages", []):
+                    mtype = getattr(msg, "type", None)
+                    # Journal every event the graph produces (best-effort; audit
+                    # layer only — never the source of truth).
+                    if mtype == "ai":
+                        content = getattr(msg, "content", "") or ""
+                        calls = getattr(msg, "tool_calls", None) or []
+                        if content or calls:
+                            _journal_event("llm_response", content=str(content)[:4000],
+                                           tool_calls=calls, source="agent")
+                        for call in calls:
+                            _journal_event("tool_call",
+                                           name=call.get("name", "?"),
+                                           args=call.get("args") or {},
+                                           source="agent")
+                    elif mtype == "tool":
+                        _journal_event("tool_result",
+                                      tool=getattr(msg, "name", "tool"),
+                                      preview=str(getattr(msg, "content", ""))[:2000],
+                                      call_id=getattr(msg, "tool_call_id", ""),
+                                      source="tool")
+                    elif mtype == "human" and is_nudge(msg):
+                        _journal_event("nudge",
+                                      note=str(getattr(msg, "content", ""))[:500],
+                                      source="system")
                     is_final_answer = (
-                        getattr(msg, "type", None) == "ai"
+                        mtype == "ai"
                         and msg.content
                         and not (getattr(msg, "tool_calls", None) or [])
                     )
@@ -896,8 +1244,13 @@ def _stream_turn(app, config, user_input: str) -> None:
                         spinner.stop()
                         spinner_running = False
                     _render_message(msg)
-                    answered = answered or bool(is_final_answer)
+                    if is_final_answer:
+                        last_final = str(msg.content)
+                        answered = True
+        if answered:
+            _journal_event("finish", message=last_final[:2000], source="agent")
     finally:
+        _set_current_journal(None)
         if spinner_running:
             spinner.stop()
 
@@ -915,10 +1268,15 @@ _SLASH_HELP = [
     ("Session", "/quit, /exit", "End the session"),
     ("Session", "/new, /clear", "Start a fresh conversation (new memory thread)"),
     ("Session", "/history", "Show conversation history summary"),
+    ("Session", "/sessions", "List past sessions (journals), newest by activity)"),
+    ("Session", "/session <id> <query>", "Search a past session's events by keyword"),
     ("Memory", "/knowledge <q>", "Search long-term memory (a '#tag' query filters by tag)"),
     ("Memory", "/save <fact> [#tag ...]", "Store a fact in long-term memory, optionally tagged"),
     ("Memory", "/tags", "List distinct memory tags with counts"),
     ("Memory", "/forget <id>", "Delete a memory from the store by id"),
+    ("Reflex", "/reflex", "List procedural reflex rules (uses, disabled state)"),
+    ("Reflex", "/reflex disable <id>", "Disable a reflex rule so it no longer fires"),
+    ("Reflex", "/reflex enable <id>", "Re-enable a disabled reflex rule"),
     ("Vault", "/vault list", "List credentials stored in the vault"),
     ("Vault", "/vault status", "Show vault health dashboard"),
     ("Tasks", "/tasks", "List background tasks and their status"),
@@ -942,7 +1300,7 @@ def _tail_log(n: int = 30) -> str:
             from collections import deque
             lines = deque(f, maxlen=n)
             return "".join(lines).strip()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — log read errors are user-facing
         return f"Error reading log file: {e}"
 
 
@@ -962,7 +1320,7 @@ def _handle_slash(text: str, config: dict, app: object) -> bool:
         try:
             state = app.get_state(config)
             messages = state.values.get("messages", []) if state else []
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — state retrieval is best-effort
             ui.warning(f"Failed to retrieve state: {e}")
             return False
         if not messages:
@@ -1034,7 +1392,18 @@ def _handle_slash(text: str, config: dict, app: object) -> bool:
     if cmd in ("new", "clear"):
         new_id = f"session_{uuid.uuid4().hex[:8]}"
         config["configurable"]["thread_id"] = new_id
+        _start_journal(new_id)
         ui.success(f"Started a fresh conversation (thread {new_id}).")
+        return False
+    if cmd == "sessions":
+        ui.info(_format_sessions())
+        return False
+    if cmd == "session":
+        parts2 = arg.split(maxsplit=1)
+        if len(parts2) < 2:
+            ui.warning("Usage: /session <id> <query>")
+            return False
+        ui.info(_search_session(parts2[0], parts2[1]))
         return False
     if cmd == "config":
         ui.kv("config file", app_config.describe())
@@ -1049,6 +1418,7 @@ def _handle_slash(text: str, config: dict, app: object) -> bool:
                                f"mmr lambda {_memory_store.MMR_LAMBDA}, "
                                f"lexical {'on' if _memory_store.LEXICAL_SEARCH else 'off'}")
         ui.kv("scratch dir", _scratch.SCRATCH_DIR)
+        ui.kv("sessions dir", str(_journals_dir()))
         ui.kv("tasks dir", _tasks.TASKS_DIR)
         ui.kv("inline caps", f"file {_file_ops.READ_INLINE_CHARS}, "
                              f"grep {_code_search.GREP_INLINE_LINES} lines, "
@@ -1133,6 +1503,37 @@ def _handle_slash(text: str, config: dict, app: object) -> bool:
         else:
             ui.warning(f"Memory with id '{arg}' not found.")
         return False
+    if cmd == "reflex":
+        sub, rest = (arg.split(maxsplit=1) + [""])[:2] if arg else ("", "")
+        sub = sub.lower()
+        if sub == "disable":
+            if not rest:
+                ui.warning("Usage: /reflex disable <rule_id>")
+                return False
+            if _reflex_store.disable(rest.strip()):
+                ui.success(f"Disabled reflex rule '{rest.strip()}'")
+            else:
+                ui.warning(f"Reflex rule '{rest.strip()}' not found.")
+            return False
+        if sub == "enable":
+            if not rest:
+                ui.warning("Usage: /reflex enable <rule_id>")
+                return False
+            if _reflex_store.enable(rest.strip()):
+                ui.success(f"Re-enabled reflex rule '{rest.strip()}'")
+            else:
+                ui.warning(f"Reflex rule '{rest.strip()}' not found.")
+            return False
+        rules = _reflex_store.all()
+        if not rules:
+            ui.info("No reflex rules stored.  The model can store one via the "
+                    "reflex_distill tool after a successful shell command.")
+            return False
+        ui.header(f"Reflex Rules ({len(rules)})")
+        for r in rules:
+            state = "disabled" if r.get("disabled") else f"{r.get('uses', 0)} use(s)"
+            ui.kv(f"{r['id']} — {r['trigger']}", f"`{r['command']}` [{state}]")
+        return False
     if cmd == "compact":
         state = app.get_state(config)
         messages = state.values.get("messages", []) if state else []
@@ -1163,8 +1564,10 @@ def _handle_slash(text: str, config: dict, app: object) -> bool:
                     "summary": new_summary
                 })
                 _ctx.record_compaction(len(removable), _ctx.total_tokens(removable))
+                _journal_event("condensation", kind="summary", summary=new_summary,
+                              dropped=len(removable), source="system")
                 ui.success(f"Successfully compacted {len(removable)} message(s) into rolling summary.")
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — checkpoint update is best-effort
                 ui.warning(f"Failed to update checkpoint state: {e}")
         else:
             ui.warning("Older messages exist but lack stable checkpoint IDs to be removed.")
@@ -1218,6 +1621,11 @@ def run_repl(app, config):
                 break
             continue
 
+        global _turn
+        _turn += 1
+        _journal_event("user_message", text=user_input, source="user")
+        _journal_set_title(user_input)
+
         try:
             _stream_turn(app, config, user_input)
         except KeyboardInterrupt:
@@ -1227,7 +1635,7 @@ def run_repl(app, config):
         except EOFError:
             ui.info("Session closing...")
             break
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — session loop must not crash
             # Don't kill the session over a single failed turn.
             logger.exception("Error while processing turn")
             err_msg = str(e)
@@ -1258,6 +1666,7 @@ def main() -> None:
     global _active_thread_id
     _active_thread_id = session_id
     _warmup.start()
+    _start_journal(session_id)
     config = {
         "configurable": {"thread_id": session_id},
         "recursion_limit": RECURSION_LIMIT,

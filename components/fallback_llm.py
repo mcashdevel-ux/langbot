@@ -389,7 +389,7 @@ class FallbackLLM:
             client = (factory(tier) if factory is not None
                       else tier.client(tier.api_key()))
             response = client.invoke(prompt)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — any API failure triggers tier fallback
             wait = _retry_after_seconds(exc)
             with self._lock:
                 # Spend the estimate anyway: a request that 429s still counted
