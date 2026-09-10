@@ -180,10 +180,11 @@ def _fmt(task: Task) -> str:
     return f"{line}  {task.command[:80]}"
 
 
-def task_start(command: str, cwd: str = "") -> str:
+def task_start(command: str, cwd: str = "", manager: Optional[BackgroundTaskManager] = None) -> str:
     """Start a background task; returns its id."""
+    mgr = manager or globals()["manager"]
     try:
-        task = manager.start(command, cwd=cwd or None)
+        task = mgr.start(command, cwd=cwd or None)
     except ValueError as e:
         return f"Error: {e}"
     except OSError as e:
@@ -191,33 +192,37 @@ def task_start(command: str, cwd: str = "") -> str:
     return f"Started {task.id} (pid {task.pid}). Use task_list / task_output / task_kill."
 
 
-def task_list() -> str:
+def task_list(manager: Optional[BackgroundTaskManager] = None) -> str:
     """List all background tasks and their status."""
-    tasks = manager.list()
+    mgr = manager or globals()["manager"]
+    tasks = mgr.list()
     if not tasks:
         return "No background tasks."
     return "\n".join(_fmt(t) for t in tasks)
 
 
-def task_status(task_id: str) -> str:
+def task_status(task_id: str, manager: Optional[BackgroundTaskManager] = None) -> str:
     """Show one task's status and command."""
-    task = manager.get(task_id)
+    mgr = manager or globals()["manager"]
+    task = mgr.get(task_id)
     if task is None:
         return f"No such task: {task_id}"
     return _fmt(task)
 
 
-def task_output(task_id: str, offset: int = 0) -> str:
+def task_output(task_id: str, offset: int = 0, manager: Optional[BackgroundTaskManager] = None) -> str:
     """Read captured output for a task, paged by byte offset."""
-    out = manager.output(task_id, offset=offset)
+    mgr = manager or globals()["manager"]
+    out = mgr.output(task_id, offset=offset)
     if out is None:
         return f"No such task: {task_id}"
     return out
 
 
-def task_kill(task_id: str) -> str:
+def task_kill(task_id: str, manager: Optional[BackgroundTaskManager] = None) -> str:
     """Terminate a running background task."""
-    task = manager.kill(task_id)
+    mgr = manager or globals()["manager"]
+    task = mgr.kill(task_id)
     if task is None:
         return f"No such task: {task_id}"
     if task.status == "killed":

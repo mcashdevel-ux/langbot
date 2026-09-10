@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 import shlex
+from dataclasses import dataclass
 
 # A dangerous sub-command chained after something innocuous
 # (`echo hi; rm -rf /`) should still be caught, so the full string is split
@@ -149,3 +150,111 @@ def catastrophic_reason(command: str) -> "str | None":
         if reason:
             return reason
     return None
+
+
+# ---------------------------------------------------------------------------
+# Track F — token-aware confirmation gate (ported from neo/core/safety.py)
+# ---------------------------------------------------------------------------
+# langbot's ``catastrophic_reason`` above is the hard-block layer (whole-system,
+# irreversible actions — refused outright, no confirmation, ever).  Neo's
+# ``SafetyGate`` adds the *gray zone* on top: a trusted-readonly-binary
+# allowlist fast-paths ``ls``/``cat``/``grep``/… (no confirmation), and everything
+# else that mutates is routed through a confirmation verdict when the gate is
+# enabled.  The gate is token-aware, not prefix-aware: every chained piece
+# is checked, so ``cat foo; rm -rf x`` is never treated as trusted read-only
+# (and is in fact already hard-blocked by ``catastrophic_reason`` above).
+#
+# langbot's default policy is ``SAFE_WRITE`` with ``confirm_mutating=False`` —
+# i.e. exactly the pre-Track-F behaviour: everything that is not catastrophic
+# runs immediately.  ``confirm_mutating=True`` (config ``tools.confirm_mutating``)
+# turns the gray zone into a confirmation path instead.
+
+# Policy levels (mirroring neo).
+READ_ONLY = "read_only"
+SAFE_WRITE = "safe_write"
+FULL_EXEC = "full_exec"
+
+# Trusted read-only command *binaries* (matched after shell parsing, not by
+# prefix): every pipelined/chained piece must start with one of these for the
+# command to count as read-only.  ``sudo`` is unwrapped so ``sudo ls`` is
+# still trusted read-only.
+_TRUSTED_BINARIES = {
+    "ls", "cat", "head", "tail", "pwd", "whoami", "id", "uname", "uptime",
+    "date", "df", "du", "free", "ps", "which", "echo", "env", "hostname",
+    "nproc", "lscpu", "lsblk", "find", "grep", "wc", "file", "stat",
+}
+
+
+@dataclass
+class Verdict:
+    """Outcome of a safety check on one shell command."""
+    allowed: bool
+    needs_confirm: bool = False
+    reason: str = ""
+
+
+def _split_commands(command: str) -> list[str]:
+    """Split a shell string on separators into individual command pieces.
+    Best-effort — not a real shell parser, but defeats ``safe; malicious``."""
+    return [c.strip() for c in _SEPARATORS.split(command) if c.strip()]
+
+
+def _first_token(cmd: str) -> str:
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        tokens = cmd.split()
+    if not tokens:
+        return ""
+    tok = tokens[0]
+    if tok == "sudo" and len(tokens) > 1:
+        return tokens[1]
+    return tok
+
+
+def is_trusted_readonly(command: str) -> bool:
+    """True only if EVERY pipelined/chained piece is a trusted read-only binary
+    with no output redirection.  ``cat foo; rm -rf x`` → False (the rm piece
+    is not trusted); ``ls -la | grep foo`` → True (both pieces trusted);
+    ``cat foo > out.txt`` → False (redirection is a write)."""
+    pieces = _split_commands(command)
+    if not pieces:
+        return False
+    for piece in pieces:
+        if _first_token(piece) not in _TRUSTED_BINARIES:
+            return False
+        if re.search(r"[>]|>>", piece):
+            return False
+    return True
+
+
+class SafetyGate:
+    """Token-aware confirmation gate for shell commands.
+
+    ``policy`` mirrors neo: ``read_only`` refuses anything but trusted read-only
+    commands; ``safe_write``/``full_exec`` fast-path trusted read-only and route
+    the rest through ``needs_confirm`` when ``confirm_mutating`` is set.  The
+    catastrophic denylist (``catastrophic_reason``) always wins — hard block,
+    no confirmation, ever.
+    """
+
+    def __init__(self, policy: str = SAFE_WRITE, confirm_mutating: bool = False):
+        self.policy = policy
+        self.confirm_mutating = confirm_mutating
+
+    def check_shell(self, command: str) -> Verdict:
+        reason = catastrophic_reason(command)
+        if reason:
+            return Verdict(allowed=False, reason=f"BLOCKED: {reason}")
+        if self.policy == READ_ONLY:
+            if is_trusted_readonly(command):
+                return Verdict(allowed=True)
+            return Verdict(allowed=False,
+                           reason="read-only policy: only trusted read commands allowed")
+        # safe_write / full_exec
+        if is_trusted_readonly(command):
+            return Verdict(allowed=True)
+        if self.confirm_mutating:
+            return Verdict(allowed=True, needs_confirm=True,
+                           reason="mutating command requires confirmation")
+        return Verdict(allowed=True)

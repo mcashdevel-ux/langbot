@@ -53,6 +53,25 @@ NEAR_MISS_PATTERNS = (
 )
 _NEAR_MISS_REGEX = [re.compile(pat, re.I) for pat in NEAR_MISS_PATTERNS]
 
+# Polite chat closers that ask the user what they want ("what would you like me
+#to do?", "is there anything you would like me to help with?") — these are
+# *questions back*, not requests for permission to proceed with a task.  The
+# broad ``PERMISSION_PHRASES`` entries ("would you like me", "would you like me
+#to") would otherwise match them and nudge a perfectly good chat answer into
+# pointless tool exploration (see the "what can you do?" sessions).
+_QUESTION_BACK_RE = re.compile(
+    r"\b(?:what|anything(?: else)?|is there anything|something(?: else)?)\s+"
+    r"(?:(?:would|do|did|can|could)\s+you|you\s+(?:would|do|did|can|could))\s+"
+    r"like\s+me\s+to\b",
+    re.I,
+)
+
+
+def _is_question_back(text: str) -> bool:
+    """True when the text asks the user what they want, rather than asking
+    permission to proceed (e.g. "What would you like me to do?")."""
+    return bool(text and _QUESTION_BACK_RE.search(text))
+
 # Patterns that indicate the model is hallucinating tool calls as code blocks
 # instead of invoking the actual function-calling interface.
 TOOL_AVOIDANCE_PATTERNS = (
@@ -294,9 +313,14 @@ def route_agent(state):
             return "distill"
 
         content_lower = content.lower()
+        # "What would you like me to do?" is a question back to the user, not a
+        # permission-ask — don't nudge a good chat answer into tool exploration.
+
         needs_nudge = (
-            any(phrase in content_lower for phrase in PERMISSION_PHRASES)
+            (any(phrase in content_lower for phrase in PERMISSION_PHRASES)
+             and not _is_question_back(content))
             or any(pat in content_lower for pat in TOOL_AVOIDANCE_PATTERNS)
+
         )
         if needs_nudge and nudges_since_human(messages) < MAX_NUDGES_PER_TURN:
             return "nudge"

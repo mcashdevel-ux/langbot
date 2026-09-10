@@ -34,6 +34,54 @@ logger = logging.getLogger(__name__)
 
 DYNAMIC_BINDING = config.get("tools.dynamic_binding", True)
 
+# ---------------------------------------------------------------------------
+# Track F — tool safety/tier metadata (declarative classification).
+# ---------------------------------------------------------------------------
+# Every tool carries a ``safety`` class (read/write/exec) and a ``tier``
+# (core/server/vector/mcp/pi, mirroring neo's ToolSpec).  langbot.py
+# registers its built-ins at startup via ``register_tool_meta``; plugin tools
+# default to read/core.  ``select_tools`` skips tools whose tier exceeds
+# ``tools.max_tier`` (default TIER_SERVER — everything langbot ships is bound;
+# a device without optional deps can set ``tools.max_tier: 0`` for a core-only,
+# fully-offline agent).
+TIER_CORE = 0
+TIER_SERVER = 1
+TIER_VECTOR = 2
+TIER_MCP = 3
+TIER_PI = 4
+
+SAFETY_READ = "read"
+SAFETY_WRITE = "write"
+SAFETY_EXEC = "exec"
+
+_TOOL_SAFETY: "dict[str, str]" = {}
+_TOOL_TIERS: "dict[str, int]" = {}
+
+MAX_TIER = config.get("tools.max_tier", TIER_SERVER)
+
+
+def register_tool_meta(name: str, safety: str = SAFETY_READ,
+                        tier: int = TIER_CORE) -> None:
+    """Declare a tool's safety class and tier (Track F).  Unknown tools
+    (e.g. plugins that don't call this) default to read/core."""
+    _TOOL_SAFETY[name] = safety
+    _TOOL_TIERS[name] = tier
+
+
+def tool_safety(name: str) -> str:
+    """Safety class of a tool (default read)."""
+    return _TOOL_SAFETY.get(name, SAFETY_READ)
+
+
+def tool_tier(name: str) -> int:
+    """Tier of a tool (default core)."""
+    return _TOOL_TIERS.get(name, TIER_CORE)
+
+
+def max_tier() -> int:
+    """Highest tool tier allowed by config (``tools.max_tier``)."""
+    return config.get("tools.max_tier", MAX_TIER)
+
 # Always bound. ``recall`` is here despite being a memory tool: the system
 # prompt requires a recall before any answer that depends on what we know, so
 # leaving it unbound would silently disable that rule.
@@ -110,6 +158,41 @@ _TOOL_DESCRIPTIONS = {
     "recall": "Search long-term memory for facts relevant to a query.",
     "vault": "Store, retrieve, list, or delete encrypted credentials.",
 }
+# Built-in tool safety/tier classification (Track F).  Registered at module
+# load so any consumer of this module (including unit tests) sees the same
+# metadata langbot.py relies on.  Network tools (search_web, fetch_url) are
+# tier=server so a device with ``tools.max_tier: 0`` gets a core-only, fully-
+# offline agent; everything else is core.  Safety: exec for shell/task_start,
+# write for file/task mutations, read for everything else (vault included — its
+# mutations are encrypted-store-local and the plan classifies it read).
+_BUILTIN_TOOL_META = {
+    "execute_shell_command": (SAFETY_EXEC, TIER_CORE),
+    "read_any_file": (SAFETY_READ, TIER_CORE),
+    "write_any_file": (SAFETY_WRITE, TIER_CORE),
+    "patch_file": (SAFETY_WRITE, TIER_CORE),
+    "batch_patch": (SAFETY_WRITE, TIER_CORE),
+    "git_diff": (SAFETY_READ, TIER_CORE),
+    "find_in_files": (SAFETY_READ, TIER_CORE),
+    "read_many_files": (SAFETY_READ, TIER_CORE),
+    "glob_list": (SAFETY_READ, TIER_CORE),
+    "task_start": (SAFETY_EXEC, TIER_CORE),
+    "task_list": (SAFETY_READ, TIER_CORE),
+    "task_status": (SAFETY_READ, TIER_CORE),
+   "task_output": (SAFETY_READ, TIER_CORE),
+   "task_kill": (SAFETY_WRITE, TIER_CORE),
+   "search_web": (SAFETY_READ, TIER_SERVER),
+   "fetch_url": (SAFETY_READ, TIER_SERVER),
+   "read_scratch": (SAFETY_READ, TIER_CORE),
+   "remember": (SAFETY_WRITE, TIER_CORE),
+   "recall": (SAFETY_READ, TIER_CORE),
+   "vault": (SAFETY_READ, TIER_CORE),
+   "reflex_distill": (SAFETY_WRITE, TIER_CORE),
+   "session_list": (SAFETY_READ, TIER_CORE),
+   "session_search": (SAFETY_READ, TIER_CORE),
+   "journal_search": (SAFETY_READ, TIER_CORE),
+}
+for _name, (_safety, _tier) in _BUILTIN_TOOL_META.items():
+    register_tool_meta(_name, safety=_safety, tier=_tier)
 
 
 def _get_embeddings_model():
@@ -294,11 +377,18 @@ def select_tool_names(messages) -> "set[str]":
 
 
 def select_tools(all_tools, messages) -> list:
-    """Subset of ``all_tools`` to bind, preserving their declared order."""
+    """Subset of ``all_tools`` to bind, preserving their declared order.
+
+    Tools whose tier exceeds ``tools.max_tier`` are never bound (Track F tier
+    gating) — including core tools, so a device with ``max_tier: 0`` drops
+    ``search_web`` even though it is in the always-bound core set.
+
+    """
     if not DYNAMIC_BINDING:
-        return list(all_tools)
+        return [t for t in all_tools if tool_tier(t.name) <= max_tier()]
+    available = [t for t in all_tools if tool_tier(t.name) <= max_tier()]
     names = select_tool_names(messages)
-    chosen = [t for t in all_tools if t.name in names]
-    # A model with no tools cannot act; fall back to the full set rather than
-    # letting a misconfigured core list strand the agent.
-    return chosen or list(all_tools)
+    chosen = [t for t in available if t.name in names]
+    # A model with no tools cannot act; fall back to the full *available* set
+    # rather than letting a misconfigured core list strand the agent.
+    return chosen or available

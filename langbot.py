@@ -41,8 +41,9 @@ from components.logging_setup import log_path as _log_path, setup as _setup_logg
 _setup_logging()
 
 from langchain_core.tools import tool
+from langchain_core.runnables import RunnableConfig
 from langchain_core.utils.function_calling import convert_to_openai_tool
-from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, START, END, MessagesState
 from langgraph.prebuilt import ToolNode, tools_condition
@@ -58,7 +59,6 @@ except ModuleNotFoundError:
 
 from components.web_tools import search_web as _search_web, fetch_url as _fetch_url
 from components.scratch import offload as _offload, read_scratch as _read_scratch
-from components.safety import catastrophic_reason as _catastrophic_reason
 from components.utils import MAX_OUTPUT_CHARS, truncate
 from components.truncate import maybe_truncate as _maybe_truncate
 from components.journal import (
@@ -104,7 +104,23 @@ from components import (
 )
 from components import context_budget as _ctx
 from components import housekeeping as _housekeeping
-from components.tool_router import select_tools as _select_tools, register as _register_plugin_tools
+from components.tool_router import (
+    select_tools as _select_tools,
+    register as _register_plugin_tools,
+    register_tool_meta as _register_tool_meta,
+    tool_safety as _tool_safety,
+    tool_tier as _tool_tier,
+    max_tier as _max_tier,
+    SAFETY_READ as _SAFETY_READ,
+    SAFETY_WRITE as _SAFETY_WRITE,
+    SAFETY_EXEC as _SAFETY_EXEC,
+    TIER_CORE as _TIER_CORE,
+    TIER_SERVER as _TIER_SERVER,
+)
+from components.safety import (
+    catastrophic_reason as _catastrophic_reason,
+    SafetyGate as _SafetyGate,
+)
 from tools.plugins import discover_plugins
 from components.routing import (
     RECURSION_LIMIT,
@@ -124,6 +140,11 @@ from components.session_tools import (
     set_current_journal as _set_current_journal,
 )
 from components.tool_call_repair import repair_message, stats as _repair_stats
+from components.context import (
+    KernelContext as _KernelContext,
+    context_from_config as _context_from_config,
+    stash_context as _stash_context,
+)
 
 import components.console as ui
 from components.input import read_input, setup_readline
@@ -395,6 +416,20 @@ def _extract_summary_facts(summary_text: str) -> str:
 # ------------------------------------------------------------------------------
 # 3. Tools (original + memory)
 # ------------------------------------------------------------------------------
+def _resolve_ctx(config: "RunnableConfig | None" = None) -> "_KernelContext | None":
+    """Resolve the per-run ``KernelContext`` from a tool's injected ``config``.
+
+    langgraph auto-injects ``config: RunnableConfig`` into any tool (or node) that
+    declares it, stripping it from the OpenAI schema sent to the model.  The
+    ``tools_node`` stashes a ``KernelContext`` under
+    ``config["configurable"]["kernel_context"]`` before the ToolNode runs; tools
+    resolve it from there.  When absent (direct ``.func(...)`` test calls,
+    the REPL's slash handlers, or a graph run that predates Track G), ``None``
+    is returned and callers fall back to the process-wide singletons — so the
+    context is purely additive and a revert is mechanical."""
+    if not config:
+        return None
+    return (config.get("configurable") or {}).get("kernel_context")
 @tool
 def remember(fact: str, tags: "list[str] | None" = None) -> str:
     """Store one durable fact in long-term memory.
@@ -572,7 +607,7 @@ def glob_list(pattern: str, max_results: int = 100) -> str:
     return _glob_list(pattern, max_results=max_results)
 
 @tool
-def task_start(command: str, cwd: str = "") -> str:
+def task_start(command: str, cwd: str = "", config: RunnableConfig = None) -> str:
     """Start a long-running command as a managed background task; returns its id.
 
     Use for servers, watchers, or anything that should keep running while you
@@ -582,26 +617,42 @@ def task_start(command: str, cwd: str = "") -> str:
     if _reason:
         logger.warning("catastrophic_command_blocked: refused task_start %r (%s)", command, _reason)
         return f"Refused: command not executed ({_reason})."
+    ctx = _resolve_ctx(config)
+    if ctx is not None:
+        return _tasks.task_start(command, cwd=cwd, manager=ctx.tasks)
+
     return _tasks.task_start(command, cwd=cwd)
 
 @tool
-def task_list() -> str:
+def task_list(config: RunnableConfig = None) -> str:
     """List background tasks and their status."""
+    ctx = _resolve_ctx(config)
+    if ctx is not None:
+        return _tasks.task_list(manager=ctx.tasks)
     return _tasks.task_list()
 
 @tool
-def task_status(task_id: str) -> str:
+def task_status(task_id: str, config: RunnableConfig = None) -> str:
     """Show the status of one background task."""
+    ctx = _resolve_ctx(config)
+    if ctx is not None:
+        return _tasks.task_status(task_id, manager=ctx.tasks)
     return _tasks.task_status(task_id)
 
 @tool
-def task_output(task_id: str, offset: int = 0) -> str:
+def task_output(task_id: str, offset: int = 0, config: RunnableConfig = None) -> str:
     """Read a background task's captured output, paged by byte offset."""
+    ctx = _resolve_ctx(config)
+    if ctx is not None:
+        return _tasks.task_output(task_id, offset=offset, manager=ctx.tasks)
     return _tasks.task_output(task_id, offset=offset)
 
 @tool
-def task_kill(task_id: str) -> str:
+def task_kill(task_id: str, config: RunnableConfig = None) -> str:
     """Terminate a running background task."""
+    ctx = _resolve_ctx(config)
+    if ctx is not None:
+        return _tasks.task_kill(task_id, manager=ctx.tasks)
     return _tasks.task_kill(task_id)
 
 @tool
@@ -635,7 +686,7 @@ def vault(action: str, name: str = "", value: str = "") -> str:
 
 
 @tool
-def reflex_distill(trigger: str, command: str) -> str:
+def reflex_distill(trigger: str, command: str, config: RunnableConfig = None) -> str:
     """Store a procedural reflex rule: when the user's words match ``trigger``,
     run ``command`` directly, without an LLM call.
 
@@ -644,7 +695,9 @@ def reflex_distill(trigger: str, command: str) -> str:
     (≥ 2 trigger words present in the user message), best-first, and is
     disabled via the /reflex slash command.  Returns the rule's id, or an
     error message if either field is empty."""
-    rid = _reflex_store.distill(trigger, command)
+    ctx = _resolve_ctx(config)
+    store = ctx.reflex_store if ctx and ctx.reflex_store else _reflex_store
+    rid = store.distill(trigger, command)
     if not rid:
         return ("Reflex not stored: both 'trigger' and 'command' are required "
                 "(trigger = the words that should fire it, e.g. 'check disk space').")
@@ -1002,9 +1055,204 @@ def compact_context(state: AgentState):
     }
 
 
+# ------------------------------------------------------------------------------
+# Track F — token-aware confirmation gate (config ``tools.confirm_mutating``).
+# ------------------------------------------------------------------------------
+# Default OFF: langbot is an autonomous agent ("Never ask for permission") —
+# everything that is not catastrophic runs immediately, exactly as before Track F.
+# When ON, gray-zone mutating calls (write/exec tools that aren't trusted
+# read-only) are refused with a notice; the user can approve by replying "yes"
+# (or ok/approved/go ahead/…), and the model re-issues the exact same call —
+# the gate then lets it through once.  Reflex rules are exempt: they are
+# user-created procedures (distilled from a successful command), so they count
+# as pre-approved (they still pass through ``execute_shell_command``'s own
+# catastrophic hard-block).
+_CONFIRM_MUTATING = app_config.get("tools.confirm_mutating", False)
+_APPROVAL_RE = re.compile(
+    r"^\s*(?:yes|y|yeah|ok|okay|sure|go ahead|go for it|approved|"
+    r"confirm(?:ed)?|run it|do it|proceed|affirmative)[.!]*\s*$",
+    re.I,
+)
+_safety_gate = _SafetyGate(confirm_mutating=_CONFIRM_MUTATING)
+
+# Pending user-approval state (only meaningful when ``_CONFIRM_MUTATING``).
+_pending_confirm: "str | None" = None    # exact signature awaiting approval
+_pending_confirm_tool: "str | None" = None  # tool name awaiting approval
+_pending_approved: bool = False
+
+
+def _clear_pending_confirm(ctx: "_KernelContext | None" = None) -> None:
+    """Clear the pending gray-zone approval state.
+
+    Operates on ``ctx.pending_*`` when a per-run context is present (concurrent
+    sessions must not approve each other's pending calls); otherwise on the
+    module-level defaults (the REPL's single-session path, unchanged)."""
+    if ctx is not None:
+        ctx.pending_confirm = None
+        ctx.pending_confirm_tool = None
+        ctx.pending_approved = False
+        return
+    global _pending_confirm, _pending_confirm_tool, _pending_approved
+    _pending_confirm = None
+    _pending_confirm_tool = None
+    _pending_approved = False
+
+
+def _note_user_input(text: str, ctx: "_KernelContext | None" = None) -> None:
+    """Called once per user message (before the turn streams).  A whole-message
+    approval ("yes", "ok", "go ahead", …) approves the pending gray-zone call;
+    any other message clears the pending state (the moment passed; a new task
+    context starts).  No-op when the gate is off."""
+    if ctx is not None:
+        pending_confirm = ctx.pending_confirm
+        pending_confirm_tool = ctx.pending_confirm_tool
+    else:
+        pending_confirm = _pending_confirm
+        pending_confirm_tool = _pending_confirm_tool
+    if not _CONFIRM_MUTATING:
+        return
+    if pending_confirm is None:
+        return
+    if _APPROVAL_RE.match(text.strip()):
+        if ctx is not None:
+            ctx.pending_approved = True
+        else:
+            global _pending_approved
+            _pending_approved = True
+        _journal_event("confirm_approved", tool=pending_confirm_tool,
+                        signature=pending_confirm[:300], source="user")
+        logger.info("confirm gate: user approved pending %s %r",
+                    pending_confirm_tool, pending_confirm[:120])
+    else:
+        _journal_event("confirm_cancelled", tool=pending_confirm_tool,
+                        signature=pending_confirm[:300], source="user")
+        _clear_pending_confirm(ctx)
+
+
+def _confirm_signature(tool_name: str, call: dict) -> str:
+    """Canonical signature for a mutating call, used to match a re-issued
+    call against the user-approved one.  Shell tools key on the exact command
+    string; non-shell mutating tools key on tool name + sorted args."""
+    if tool_name in ("execute_shell_command", "task_start"):
+        return str(call.get("args", {}).get("command", "") or "")
+    args_json = json.dumps(call.get("args", {}), sort_keys=True)
+    return f"{tool_name}({args_json[:200]})"
+
+
+def _check_confirm_gate(tool_name: str, call: dict, ctx: "_KernelContext | None" = None) -> "tuple[bool, str]":
+    """(allowed, reason) for one tool call under the confirmation gate.
+
+    Read tools always pass.  With the gate off (default), mutating tools pass
+    too (pre-Track-F behaviour preserved).  With it on: catastrophic → hard
+    block; trusted read-only shell → fast pass; gray zone → refuse and remember
+    the pending signature — unless the user already approved exactly this signature,
+    in which case it runs once and the pending state clears.
+    """
+    global _pending_confirm, _pending_confirm_tool, _pending_approved
+    if ctx is not None:
+        pending_confirm = ctx.pending_confirm
+        pending_confirm_tool = ctx.pending_confirm_tool
+        pending_approved = ctx.pending_approved
+    else:
+        pending_confirm = _pending_confirm
+        pending_confirm_tool = _pending_confirm_tool
+        pending_approved = _pending_approved
+    if _tool_safety(tool_name) == _SAFETY_READ:
+        return True, ""
+    if not _CONFIRM_MUTATING:
+        return True, ""
+    if tool_name in ("execute_shell_command", "task_start"):
+        cmd = _confirm_signature(tool_name, call)
+        # The gate object is built once at import; sync its confirm flag from the
+        # module-level config flag (the single source of truth) so a config
+        # change (or a test monkeypatch) takes effect without a rebuild.
+        _safety_gate.confirm_mutating = _CONFIRM_MUTATING
+        verdict = _safety_gate.check_shell(cmd)
+        if not verdict.allowed:
+            return False, verdict.reason
+        if not verdict.needs_confirm:
+            return True, ""
+    # Gray zone (mutating, not trusted read-only — or a non-shell mutating tool).
+    sig = _confirm_signature(tool_name, call)
+    if pending_approved and pending_confirm == sig and pending_confirm_tool == tool_name:
+        _clear_pending_confirm(ctx)
+        return True, ""
+    if ctx is not None:
+        ctx.pending_confirm = sig
+        ctx.pending_confirm_tool = tool_name
+        ctx.pending_approved = False
+    else:
+        _pending_confirm = sig
+        _pending_confirm_tool = tool_name
+        _pending_approved = False
+    return False, f"requires confirmation: {sig[:200]!r} — ask the user to approve it; once approved, re-issue the exact same call."
+
+
+def _gate_tool_calls(to_run: list, ctx: "_KernelContext | None" = None) -> "tuple[list, list]":
+    """Split ``to_run`` into (runnable, refused-ToolMessages) under the gate.
+
+    Refused calls are answered with a ToolMessage (same invariant as
+    ``split_repeated_calls``: every call in the assistant message is answered,
+    so the next request stays valid)."""
+    runnable = []
+    refused = []
+    for call in to_run:
+        name = call.get("name", "?")
+        allowed, reason = _check_confirm_gate(name, call, ctx)
+        if allowed:
+            runnable.append(call)
+        else:
+            logger.warning("confirm gate: refused %s (%s)", name, reason)
+            _journal_event("confirm_gate", tool=name, reason=reason,
+                            signature=_confirm_signature(name, call)[:300], source="system")
+            refused.append(ToolMessage(
+                content=f"⛔ {reason}",
+                name=name,
+                tool_call_id=call.get("id") or "",
+                status="error",
+            ))
+    return runnable, refused
+
+
+_tool_node = ToolNode(tools)
 _tool_node = ToolNode(tools)
 
-def tools_node(state: AgentState):
+# Per-thread background-task managers (Track G): two concurrent sessions must
+# not clobber each other's task lists.  Keyed by thread_id;a thread's tasks
+# survive across its own turns (the manager is created once per thread, not per
+# graph invocation), while different threads get isolated managers.  The REPL's
+# slash handlers (``/tasks``, ``/kill``) keep using the module-level singleton.
+
+_thread_tasks: "dict[str, object]" = {}
+
+
+def _ctx_for_run(config: RunnableConfig) -> "_KernelContext":
+    """Build the per-run ``KernelContext`` for a graph invocation.
+
+
+
+    The context carries:the thread_id, a per-thread task manager, the shared
+    reflex store/journal/memory worker (process-wide singletons by design),and
+    fresh per-run pending-confirm state (so two sessions can't approve each
+    other's pending calls).  It is stashed into ``config["configurable"]`` so
+    every tool in the run resolves the same instance via ``_resolve_ctx``."""
+    thread_id = (config.get("configurable") or {}).get("thread_id") or "default"
+    mgr = _thread_tasks.get(thread_id)
+    if mgr is None:
+        mgr = _tasks.BackgroundTaskManager()
+        _thread_tasks[thread_id] = mgr
+    ctx = _KernelContext(
+        thread_id=thread_id,
+        tasks=mgr,
+        reflex_store=_reflex_store,
+        journal=_current_journal,
+        memory_worker=_memory_worker,
+    )
+    _stash_context(config, ctx)
+    return ctx
+
+
+def tools_node(state: AgentState, config: RunnableConfig):
     """Run tools, then scrub any stored credential values from their output
     before it re-enters the model's context (see vault.redact).
 
@@ -1013,8 +1261,16 @@ def tools_node(state: AgentState):
     costing shell commands and fetches. Blocked calls still get a ToolMessage, so
     every call in the assistant message is answered and the next request stays valid.
     """
+    ctx = _ctx_for_run(config)
     messages = state["messages"]
     to_run, blocked = split_repeated_calls(messages)
+    # Track F confirmation gate: gray-zone mutating calls are refused here
+    # (when ``tools.confirm_mutating`` is on) before they reach the tool node.
+
+
+
+    to_run, gated = _gate_tool_calls(to_run, ctx)
+    blocked = blocked + gated
     if not blocked:
         result = _tool_node.invoke(state)
     elif not to_run:
@@ -1066,6 +1322,25 @@ def _stuck_directive(verdict, ignored: int) -> str:
     return f"{NUDGE_MARKER} {STUCK_HALT_MARKER} {text}"
 
 
+def _current_turn_messages(messages) -> list:
+    """Messages since the last real user message (nudges excluded) — the
+    window stuck detection must see.
+
+    The detector's patterns (monologue, repeating, soft_repeating,
+    alternating) count events across whatever list they are given; if they
+    saw the whole session, prior turns' chat answers (content-only AI
+    messages that legitimately ended those turns) would poison the monologue
+    counter and halt a perfectly good tool round in the current turn.  Slicing
+    to the current turn mirrors neo's design, where the detector folds the
+    journaled event log per turn (see docs/neo-port-plan.md Track C).
+    """
+    for i in range(len(messages) - 1, -1, -1):
+        m = messages[i]
+        if isinstance(m, HumanMessage) and not is_nudge(m):
+            return messages[i:]
+    return messages
+
+
 def stuck_node(state: AgentState):
     """Run stuck detection after each tool round ((between ``tools`` and
     ``compact``).  On a verdict,, inject a corrective HumanMessage ((the
@@ -1075,7 +1350,7 @@ def stuck_node(state: AgentState):
     routed straight to ``distill``/END — no 4th call..
     """
     messages = state["messages"]
-    verdict = _STUCK_DETECTOR.check(messages)
+    verdict = _STUCK_DETECTOR.check(_current_turn_messages(messages))
     if verdict is None:
         return {}
     ignored = sum(1 for m in messages
@@ -1625,6 +1900,9 @@ def run_repl(app, config):
         _turn += 1
         _journal_event("user_message", text=user_input, source="user")
         _journal_set_title(user_input)
+        # Track F: a whole-message approval ("yes", "ok", "go ahead", …)
+        # approves the pending gray-zone call; any other message clears it.
+        _note_user_input(user_input)
 
         try:
             _stream_turn(app, config, user_input)
