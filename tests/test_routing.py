@@ -49,3 +49,26 @@ def test_route_agent_near_miss_telemetry():
     decision = routing.route_agent(state)
     assert decision == "distill"
     assert routing._STATS["near_miss_permission_hedges"] == 1
+
+
+def test_question_back_closer_does_not_nudge():
+    """"What would you like me to do?" is a question back to the user, not a
+    permission-ask — it must route to distill (final answer), not nudge."""
+    state = {
+        "messages": [
+            HumanMessage(content="what can you do?"),
+            AIMessage(content="I'm an autonomous assistant... So — what would you like me to do?"),
+        ]
+    }
+    assert routing.route_agent(state) == "distill"
+
+
+def test_explicit_permission_ask_still_nudges():
+    """A real permission-ask must still trigger the nudge."""
+    state = {
+        "messages": [
+            HumanMessage(content="run the tests"),
+            AIMessage(content="Would you like me to run the tests?"),
+        ]
+    }
+    assert routing.route_agent(state) == "nudge"

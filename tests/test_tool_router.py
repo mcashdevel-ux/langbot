@@ -217,3 +217,63 @@ class TestPerToolThresholdAndTruncation:
         assert "...[TRUNCATED]..." in text
         assert len(text) < len(long_content)
 
+
+
+class TestTierGating:
+    """Track F: tools whose tier exceeds ``tools.max_tier`` are never bound."""
+
+    @staticmethod
+    def _set_max_tier(monkeypatch, tier):
+        """Point ``tools.max_tier`` config at ``tier`` for the duration of the test."""
+        from components.config import config
+        original_get = config.get
+
+        def mock_get(key, default, env=None):
+            if key == "tools.max_tier":
+                return tier
+            return original_get(key, default, env)
+
+        monkeypatch.setattr(config, "get", mock_get)
+
+    def test_default_max_tier_binds_everything(self, monkeypatch):
+        """With the default max_tier (server), network tools are *available*:
+        when their trigger matches, they are bound (not tier-gated away)."""
+        self._set_max_tier(monkeypatch, tool_router.TIER_SERVER)
+
+        names = _names([HumanMessage(content="fetch the url https://example.com/x")])
+        assert "search_web" in names
+        assert "fetch_url" in names
+
+    def test_core_only_max_tier_hides_network_tools(self, monkeypatch):
+        self._set_max_tier(monkeypatch, tool_router.TIER_CORE)
+        names = _names([HumanMessage(content="search the web for langbot")])
+        assert "search_web" not in names
+        assert "fetch_url" not in names
+        assert "execute_shell_command" in names
+
+    def test_core_only_still_binds_core_tools_even_when_triggered(self, monkeypatch):
+        self._set_max_tier(monkeypatch, tool_router.TIER_CORE)
+        names = _names([HumanMessage(content="vault list credentials")])
+        assert "vault" in names
+
+    def test_tier_gating_applies_to_core_tools_too(self, monkeypatch):
+        """search_web is in the always-bound core set; tier gating must still
+        drop it when max_tier is below its tier."""
+        self._set_max_tier(monkeypatch, tool_router.TIER_CORE)
+        monkeypatch.setattr(tool_router, "CORE_TOOLS", list(tool_router.CORE_TOOLS))
+        names = _names([HumanMessage(content="hello")])
+        assert "search_web" not in names
+
+    def test_register_tool_meta_and_lookup(self):
+        tool_router.register_tool_meta("my_plugin_tool", safety="write", tier=2)
+        assert tool_router.tool_safety("my_plugin_tool") == "write"
+        assert tool_router.tool_tier("my_plugin_tool") == 2
+        assert tool_router.tool_safety("unknown_tool") == "read"
+        assert tool_router.tool_tier("unknown_tool") == 0
+
+    def test_dynamic_binding_off_respects_tier(self, monkeypatch):
+        self._set_max_tier(monkeypatch, tool_router.TIER_CORE)
+        monkeypatch.setattr(tool_router, "DYNAMIC_BINDING", False)
+        names = {t.name for t in tool_router.select_tools(ALL, [HumanMessage(content="hello")])}
+        assert "search_web" not in names
+        assert "execute_shell_command" in names

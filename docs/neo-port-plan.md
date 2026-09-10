@@ -247,7 +247,19 @@ week?" without the human grepping `./memory/sessions/`.  langbot's
 
 ## Track F — Tool Registry with Safety Tiers + Token-Aware Confirmation Gate
 
-**Status: OPEN (partial: langbot already has `components/tool_router.py`).
+**Status: DONE (safety/tier classification + SafetyGate port + tier-gated
+binding + config-gated confirmation gate + tests).**  Design notes: the
+confirmation gate is **off by default** (`tools.confirm_mutating: false`) so
+langbot's autonomy contract ("Never ask for permission") is preserved exactly;
+when on, gray-zone mutating calls are refused with a notice, and the user can
+approve by replying "yes"/"ok"/"go ahead"/… — the model then re-issues the exact
+same call and it runs once.  The safety/tier metadata lives in
+`components/tool_router.py` (`_BUILTIN_TOOL_META`, registered at module load)
+so any consumer (including unit tests) sees the same classification langbot.py
+relies on.  Network tools (`search_web`, `fetch_url`) are tier=server; a device
+with `tools.max_tier: 0` gets a core-only, fully-offline agent.  Reflex
+rules are exempt from the confirm gate (user-created procedures count as
+pre-approved; they still pass through the catastrophic hard-block).
 
 **Why.** langbot binds tools per step via `tool_router.select_tools`, but the
 set is chosen by heuristics, not by a declared safety/tier classification. Neo's
@@ -298,7 +310,26 @@ a confirmation prompt.
 
 ## Track G — KernelContext Dependency Injection (multi-agent isolation)
 
-**Status: OPEN (structural; last).
+**Status: DONE (context dataclass + config-stash injection + per-thread task
+managers + per-run confirm-gate state + tests).**  Design notes: langgraph
+1.2.11 auto-injects a ``config: RunnableConfig`` param into any tool that
+declares it, strips it from the OpenAI schema sent to the model, and carries
+arbitrary ``configurable`` keys — so instead of neo's explicit ``ctx`` param,
+``tools_node`` stashes a ``KernelContext`` under
+``config["configurable"]["kernel_context"]`` and tools resolve it via
+``_resolve_ctx(config)``, falling back to the process-wide singletons when
+absent (direct ``.func(...)`` test calls, REPL slash handlers, pre-Track-G
+runs)..  Task managers are per-thread (``_thread_tasks`` keyed by thread_id:
+a thread reuses its manager across turns; different threads get isolated
+managers, so two concurrent sessions don't clobber each other's task lists).
+while ``_reflex_store``, ``_current_journal``, and ``_memory_worker`` stay
+process-wide singletons by design (documented follow-ups if multi-session
+isolation is ever needed)..  The Track F confirmation-gate pending state
+(``pending_confirm``/``pending_approved``) lives on the per-run context, so
+two sessions can't approve each other's pending calls.  ``_file_backups``/
+``_read_cache`` from the original plan turned out not to exist as module-level
+globals in langbot (the file layer is stateless/scratch-based), so nothing
+to relocate there.
 
 **Why.** langbot's tools reach module-level globals (`_tasks`, `_file_backups`,
 `_read_cache`, `_memory_worker`, `_vault_*`).  Neo's `KernelContext`
@@ -362,7 +393,9 @@ behavior change) so a revert is mechanical.
 - **F** sixth — declarative classification + a better gate; touches the
   confirmation path, so it lands after the mechanical tracks are stable.
 - **G** last — structural; touches every tool wrapper; only worth it when
-  multi-session/server work is actually planned.
+  multi-session/server work is actually planned.  **Now DONE** — landed
+  after A–F were stable, kept to a pure relocation (no behavior change),
+  and covered by `tests/test_langbot_context_wiring.py`.
 
 
 
