@@ -1215,7 +1215,6 @@ def _gate_tool_calls(to_run: list, ctx: "_KernelContext | None" = None) -> "tupl
 
 
 _tool_node = ToolNode(tools)
-_tool_node = ToolNode(tools)
 
 # Per-thread background-task managers (Track G): two concurrent sessions must
 # not clobber each other's task lists.  Keyed by thread_id;a thread's tasks
