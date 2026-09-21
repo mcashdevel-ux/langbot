@@ -19,6 +19,7 @@ This directory contains additional documentation for langbot.
 |----------|-------------|
 | [TODO.md](TODO.md) | Planned features and improvements |
 | [langbot-upgrade-plan.md](langbot-upgrade-plan.md) | Version upgrade roadmap |
+| [langbot-architecture-review.md](langbot-architecture-review.md) | Self-analysis of the agent: graph, safety, memory, routing, context |
 
 ## Quick Links
 
