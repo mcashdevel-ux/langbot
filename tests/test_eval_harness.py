@@ -178,9 +178,9 @@ class TestEvalHarness:
         """Context budget: a large thread should trigger needs_compaction."""
         import components.context_budget as ctx
 
-        big = [HumanMessage(content="x " * 20_000) for _ in range(4)]
+        big = [HumanMessage(content="x " * 400_000) for _ in range(4)]
         assert ctx.needs_compaction(big), \
-            "a thread of 4 x 20K-char messages must cross the compaction threshold"
+            "a thread of 4 x 400K-char messages must cross the compaction threshold"
 
     # ── Task 6: Fuzzy "check auth" → vault bound via embedding ─────
     def test_task_06_fuzzy_vault_binding(self):

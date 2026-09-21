@@ -6,7 +6,20 @@ Sync local ChromaDB long-term memory ↔ Supabase cloud knowledge table.
 Uses vault credentials (SUPABASE_URL + SUPABASE_SERVICE_KEY).
 Falls back to env vars if vault not available.
 Two-way sync: push local facts up, pull remote facts down.
-Deduplicates by fact text (exact match).
+
+Schema (v2):
+  knowledge_v2   — facts. Columns: id, fact, fact_norm, fact_hash, fact_tsv,
+                   tags, source_agent, source_session, confidence, created_by,
+                   stale, stale_reason, needs_review, access_count,
+                   created_at, updated_at.  Writes go through the
+                   ``insert_fact`` RPC, which normalizes the text, computes
+                   ``fact_hash`` and upserts on it, so re-pushing a fact is a
+                   no-op instead of a duplicate row.
+  vault_secrets  — encrypted credentials. Columns: id, name, ciphertext,
+                   tags, stale, rotated_at, created_at.
+
+Deduplication is by ``fact_hash`` (server-side, in ``insert_fact``) rather than
+by exact fact text, so whitespace/case variants collapse to one row.
 
 Credentials are read from (in priority order):
   1. os.environ  (including anything auto-loaded from vault at startup)
@@ -45,7 +58,16 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-VAULT_SECRET_MARKER = "🎯"   # prefix for secret entries in the knowledge table
+VAULT_SECRET_MARKER = "🎯"   # legacy prefix for secret entries in the knowledge table
+
+# ── Supabase schema (v2) ──
+# The old single ``knowledge`` table was split: facts live in ``knowledge_v2``
+# and encrypted credentials in ``vault_secrets``.  Both are addressed through
+# PostgREST as ``{url}/rest/v1/{table}``.
+KNOWLEDGE_TABLE = "knowledge_v2"
+SECRETS_TABLE = "vault_secrets"
+# RPC that normalizes + hashes the fact and upserts on fact_hash.
+INSERT_FACT_RPC = "insert_fact"
 
 # ---------------------------------------------------------------------------
 # Credential helpers
@@ -289,39 +311,32 @@ class SupabaseSync:
         if not entries:
             return "No local knowledge entries to push."
 
-        # Fetch existing remote facts to skip duplicates
-        try:
-            r = requests.get(
-                f"{self.url}/rest/v1/knowledge",
-                headers=self._headers(),
-                params={"select": "fact", "stale": "eq.false"},
-                timeout=10,
-            )
-            existing: set[str] = set()
-            if r.status_code == 200:
-                for row in r.json() or []:
-                    if row.get("fact"):
-                        existing.add(row["fact"].strip())
-        except Exception:  # noqa: BLE001 — existing-facts lookup is best-effort
-            logger.debug("supabase_sync: existing-facts lookup failed", exc_info=True)
-            existing = set()
-
+        # Push through the insert_fact RPC.  The server normalizes the text,
+        # computes fact_hash and upserts on it, so duplicates collapse to one
+        # row and we no longer need a client-side existing-facts lookup.
         pushed = errors = 0
         for fact, tags in entries:
-            if fact in existing:
-                continue
-            payload = {"fact": fact, "tags": tags, "access_count": 0, "stale": False}
+            payload = {
+                "p_fact": fact,
+                "p_tags": tags,
+                "p_source_agent": "langbot",
+                "p_created_by": "supabase_sync",
+            }
             try:
                 r = requests.post(
-                    f"{self.url}/rest/v1/knowledge",
+                    f"{self.url}/rest/v1/rpc/{INSERT_FACT_RPC}",
                     headers=self._headers(),
                     json=payload,
                     timeout=10,
                 )
-                if r.status_code in (200, 201):
+                if r.status_code in (200, 201, 204):
                     pushed += 1
                 else:
                     errors += 1
+                    logger.warning(
+                        "supabase_sync push error: HTTP %s - %s",
+                        r.status_code, r.text[:200],
+                    )
             except Exception as e:  # noqa: BLE001
                 errors += 1
                 logger.warning("supabase_sync push error: %s", e)
@@ -336,7 +351,7 @@ class SupabaseSync:
 
         try:
             r = requests.get(
-                f"{self.url}/rest/v1/knowledge",
+                f"{self.url}/rest/v1/{KNOWLEDGE_TABLE}",
                 headers=self._headers(),
                 params={
                     "select": "fact,created_at,tags",
@@ -433,21 +448,19 @@ class SupabaseSync:
         if not creds:
             return "No vault credentials found to sync."
 
-        # Fetch existing remote secret names to skip duplicates
+        # Fetch existing remote secret names to skip duplicates.
         try:
             r = requests.get(
-                f"{self.url}/rest/v1/knowledge",
+                f"{self.url}/rest/v1/{SECRETS_TABLE}",
                 headers=self._headers(),
-                params={"select": "fact", "stale": "eq.false",
-                        "fact": f"like.{VAULT_SECRET_MARKER}%"},
+                params={"select": "name", "stale": "eq.false"},
                 timeout=10,
             )
             existing: set[str] = set()
             if r.status_code == 200:
                 for row in r.json() or []:
-                    fact = row.get("fact", "")
-                    if "||" in fact:
-                        existing.add(fact.split("||", 1)[0].lstrip(VAULT_SECRET_MARKER))
+                    if row.get("name"):
+                        existing.add(row["name"])
         except Exception:  # noqa: BLE001 — existing-secrets lookup is best-effort
             logger.debug("supabase_sync: existing-secrets lookup failed", exc_info=True)
             existing = set()
@@ -458,11 +471,11 @@ class SupabaseSync:
                 continue
             try:
                 encrypted = fernet.encrypt(str(value).encode()).decode()
-                fact = f"{VAULT_SECRET_MARKER}{name}||{encrypted}"
                 r = requests.post(
-                    f"{self.url}/rest/v1/knowledge",
+                    f"{self.url}/rest/v1/{SECRETS_TABLE}",
                     headers=self._headers(),
-                    json={"fact": fact, "tags": ["secret"], "access_count": 0, "stale": False},
+                    json={"name": name, "ciphertext": encrypted,
+                          "tags": ["secret"], "stale": False},
                     timeout=10,
                 )
                 if r.status_code in (200, 201):
@@ -487,16 +500,16 @@ class SupabaseSync:
 
         try:
             r = requests.get(
-                f"{self.url}/rest/v1/knowledge",
+                f"{self.url}/rest/v1/{SECRETS_TABLE}",
                 headers=self._headers(),
-                params={"select": "fact", "stale": "eq.false",
-                        "fact": f"like.{VAULT_SECRET_MARKER}%"},
+                params={"select": "name,ciphertext", "stale": "eq.false"},
                 timeout=15,
             )
             if r.status_code != 200:
                 return f"Supabase error: HTTP {r.status_code}"
 
-            secret_entries = [e for e in (r.json() or []) if "||" in e.get("fact", "")]
+            secret_entries = [e for e in (r.json() or [])
+                              if e.get("name") and e.get("ciphertext")]
             if not secret_entries:
                 return "No encrypted secrets found in Supabase."
 
@@ -505,9 +518,8 @@ class SupabaseSync:
 
             pulled = errors = 0
             for entry in secret_entries:
-                fact = entry.get("fact", "")
-                marker_name, encrypted_value = fact.split("||", 1)
-                secret_name = marker_name.lstrip(VAULT_SECRET_MARKER)
+                secret_name = entry.get("name", "")
+                encrypted_value = entry.get("ciphertext", "")
                 if secret_name in local_creds:
                     continue
                 try:
@@ -533,18 +545,15 @@ class SupabaseSync:
             return "Supabase not configured."
         try:
             r = requests.get(
-                f"{self.url}/rest/v1/knowledge",
+                f"{self.url}/rest/v1/{SECRETS_TABLE}",
                 headers=self._headers(),
-                params={"select": "fact", "stale": "eq.false",
-                        "fact": f"like.{VAULT_SECRET_MARKER}%"},
+                params={"select": "name", "stale": "eq.false"},
                 timeout=10,
             )
             if r.status_code != 200:
                 return f"Supabase error: HTTP {r.status_code}"
             names = [
-                e["fact"].split("||", 1)[0].lstrip(VAULT_SECRET_MARKER)
-                for e in (r.json() or [])
-                if "||" in e.get("fact", "")
+                e["name"] for e in (r.json() or []) if e.get("name")
             ]
             if not names:
                 return "No encrypted secrets in Supabase."

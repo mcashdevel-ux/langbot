@@ -612,7 +612,8 @@ components/
   console.py            # terminal UI helpers used by the REPL
   utils.py              # shared helpers (atomic JSON writes, truncation)
   warmup.py             # background initialiser (embeddings, housekeeping) to keep startup fast
-  supabase_sync.py      # optional cloud sync for long-term memory (two-way Chroma ↔ Supabase)
+  supabase_sync.py      # optional cloud sync for long-term memory (two-way Chroma ↔ Supabase;
+                        # facts in `knowledge_v2` via the `insert_fact` RPC, secrets in `vault_secrets`)
 langbot.config.example.json  # template listing every setting and its default
 CODE_REVIEW.md          # review of the initial commit with known issues + fixes
 CODE_OF_CONDUCT.md      # community guidelines

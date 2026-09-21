@@ -90,7 +90,7 @@
   },
 
   "context": {
-    "budget_tokens": 32768,
+    "budget_tokens": 1000000,
     "reserve_tokens": 2000,
     "compact_at": 0.7,
     "keep_last_messages": 12,
@@ -127,7 +127,7 @@
 
   "routing": {
     "max_nudges_per_turn": 3,
-    "recursion_limit": 100,
+    "recursion_limit": 300,
     "stagnation_guard": true,
     "stagnation_exempt_tools": ["task_status", "task_output", "task_list"]
   },

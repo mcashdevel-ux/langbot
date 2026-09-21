@@ -32,7 +32,7 @@ from .config import config
 logger = logging.getLogger(__name__)
 
 # Total context window of the served model.
-BUDGET_TOKENS = config.get("context.budget_tokens", 32768)
+BUDGET_TOKENS = config.get("context.budget_tokens", 1000000)
 # Held back for the system prompt, tool schemas, and the answer being generated.
 # Default 2000 covers the measured overhead: system prompt (~191 tokens) +
 # per-turn tool schemas (~950 tokens) + headroom for the rolling summary.

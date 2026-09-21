@@ -58,7 +58,9 @@ class TestNeedsCompaction:
         assert not ctx.needs_compaction([HumanMessage(content="hi")])
 
     def test_large_thread_crosses_the_threshold(self):
-        big = [HumanMessage(content="x " * 20_000) for _ in range(4)]
+        # The default budget is 1M tokens, so the thread has to be genuinely
+        # large to cross the 70% compaction threshold.
+        big = [HumanMessage(content="x " * 400_000) for _ in range(4)]
         assert ctx.needs_compaction(big)
 
 
@@ -209,10 +211,10 @@ class TestReserveTokensDefault:
         assert ctx.RESERVE_TOKENS == 2000
 
     def test_usable_budget_is_budget_minus_reserve(self):
-        # The default BUDGET_TOKENS is 32768, reserve is 2000.
+        # The default BUDGET_TOKENS is 1000000, reserve is 2000.
         expected = ctx.BUDGET_TOKENS - ctx.RESERVE_TOKENS
         assert ctx.usable_budget() == expected
-        assert ctx.usable_budget() == 30768
+        assert ctx.usable_budget() == 998000
 
     def test_compaction_threshold_is_fraction_of_usable_budget(self):
         threshold = ctx.compaction_threshold()

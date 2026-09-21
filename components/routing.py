@@ -105,7 +105,7 @@ NUDGE_MARKER = "[AUTONOMOUS AGENT DIRECTIVE]"
 # (agent -> tools -> agent), so 100 leaves room for ~48 tool rounds before
 # langgraph raises GraphRecursionError; its own default of 25 caps a turn at
 # roughly a dozen tool calls, which a research or build task exhausts easily.
-RECURSION_LIMIT = config.get("routing.recursion_limit", 100)
+RECURSION_LIMIT = config.get("routing.recursion_limit", 300)
 
 NUDGE_PERMISSION = (
     f"{NUDGE_MARKER}: Do not ask whether to proceed. Make the tool calls now."

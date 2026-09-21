@@ -102,7 +102,7 @@ def main():
             page_headers["Range-Unit"] = "items"
             page_headers["Range"] = f"{offset}-{offset + page_size - 1}"
             r = requests.get(
-                f"{url}/rest/v1/knowledge",
+                f"{url}/rest/v1/knowledge_v2",
                 headers=page_headers,
                 params={"select": "id,fact,tags", "stale": "eq.false", "order": "id.asc"},
                 timeout=30
@@ -182,7 +182,7 @@ def main():
             # 5a. Update Supabase
             try:
                 patch_r = requests.patch(
-                    f"{url}/rest/v1/knowledge?id=eq.{item_id}",
+                    f"{url}/rest/v1/knowledge_v2?id=eq.{item_id}",
                     headers=headers,
                     json={"tags": tags},
                     timeout=10
