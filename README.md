@@ -258,7 +258,8 @@ Precedence for a single setting: **environment variable > config file > default.
 | `llm` (new) | `thinking_mode` | `"auto"` lets the model decide; `"off"` appends `/no_think` to suppress reasoning blocks; `"on"` explicitly requests them |
 | `tools` (binding) | `embedding_routing`, `embedding_threshold` | embedding-based tool selection (on by default); threshold for cosine similarity (default 0.35) |
 | `memory` (pruning) | `prune_age_days`, `prune_confidence_threshold`, `default_manual_confidence`, `default_distilled_confidence` | automatic removal of stale low-confidence facts; confidence defaults for manual vs distilled facts |
-| `routing` | `max_nudges_per_turn`, `recursion_limit`, `stagnation_guard`, `stagnation_exempt_tools` | nudges (not tool rounds) allowed per turn; graph steps per turn (two per tool round); repeated-call guard (see below) |
+| `vault` | `warn_unwrapped` | print a startup banner while the master key is stored recoverably (see Security notes) |
+| `routing` | `max_nudges_per_turn`, `recursion_limit`, `stagnation_guard`, `stagnation_exempt_tools` | nudges (not tool rounds) allowed per turn; graph steps per turn (two per tool round, default `300`); repeated-call guard (see below) |
 | `compat` | `repair_json_tool_calls`, `repair_max_candidates` | recover tool calls from models that print them as text (see below) |
 | `housekeeping` | `enabled`, `scratch_max_age_days`, `scratch_max_total_mb`, `checkpoint_keep_threads` | start-up disk sweep (see below) |
 
@@ -277,7 +278,9 @@ Environment variables (override the config file):
 - `AGENT_TASKS_DIR` — where background task logs are written (default
   `./memory/agent_tasks`).
 - `LANGBOT_VAULT_PASSWORD` — if set, the vault master key is wrapped with a
-  password-derived key instead of being stored in recoverable form on disk.
+  password-derived key instead of being stored in recoverable form on disk. When it is
+  *not* set, startup prints a loud banner saying the key is unwrapped (silence it with
+  `vault.warn_unwrapped: false`).
 - `LANGBOT_LOG_FILE` — where log records are written (default `./memory/langbot.log`).
 - `LANGBOT_LOG_LEVEL` — log verbosity (default `WARNING`).
 - `LANGBOT_LOG_CONSOLE` — set to `1` to also stream log records to stderr.
@@ -330,7 +333,9 @@ tokens' worth of messages verbatim, regardless of the message count. This preven
 single enormous tool result from eating the budget while being kept verbatim.
 
 Set `budget_tokens` to the context length the server is actually serving (`llama-server
--c`), not the model's theoretical maximum.
+-c`), not the model's theoretical maximum. The default is `1000000` (1M tokens), which
+suits a large-window server; on a small local window set it to the served context length
+so compaction fires before the server silently truncates the prompt.
 
 `/health` reports what the budget is actually spending, so `reserve_tokens` stops being a
 guess:
@@ -584,7 +589,8 @@ those warnings is a good signal to fix the model's chat template or prompt forma
 - The credential vault encrypts values with AES-256-GCM and restricts its files to
   `0600`. By default the master key is stored (file-protected) alongside the ciphertext,
   so encryption at rest primarily protects against other users on the host; set
-  `LANGBOT_VAULT_PASSWORD` for password-wrapped key protection.
+  `LANGBOT_VAULT_PASSWORD` for password-wrapped key protection. Startup prints a warning
+  banner while the key is unwrapped (`vault.warn_unwrapped`, default `true`).
 
 ## Project layout
 

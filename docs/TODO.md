@@ -18,14 +18,16 @@ on the host.  Pick one approach:
 - [ ] For an existing unwrapped vault, print a migration prompt.
 - [ ] Tests: with/without password; CI-compatible (mock stdin, or skip).
 
-### Option B — Loud startup banner (simplest)
-- [ ] Add `vault.warn_unwrapped` config key (default `true`).
-- [ ] In `bootstrap()`, print an unmissable banner when the key is unwrapped.
-- [ ] Tests: banner appears when on, suppressed when off.
+### Option B — Loud startup banner (simplest) ✔ chosen
+- [x] Add `vault.warn_unwrapped` config key (default `true`).
+- [x] In `bootstrap()`, print an unmissable banner when the key is unwrapped
+  (`masterkey_is_unwrapped()` + `_warn_unwrapped_key()`, once per process).
+- [x] Tests: banner appears when on, suppressed when off, silent for a wrapped key
+  (`tests/test_vault_unwrapped_warning.py`).
 
-### Either way — fix stale README
-- [ ] The `/health` example still says "reserve 8192" and "a 8192 reserve is mostly
-  headroom."  Update to 2000.
+### Either way — fix stale README ✔
+- [x] The `/health` example no longer says "reserve 8192"; the reserve is 2000 and the
+  README documents it as tight-but-measured. Context budget default is now 1M tokens.
 
 ---
 

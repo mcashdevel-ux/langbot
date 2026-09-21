@@ -586,6 +586,43 @@ _store: Optional[VaultStore] = None
 _redactor: Optional[RedactionFilter] = None
 _agent_ref: Any = None
 _ENV_LOADED: List[str] = []  # Track which env vars were auto-loaded from vault
+_WARNED_UNWRAPPED = False    # Print the unwrapped-key banner at most once per process
+
+
+def masterkey_is_unwrapped() -> bool:
+    """True when the master key sits on disk in recoverable (``raw``) form.
+
+    A ``password_wrapped`` key needs ``LANGBOT_VAULT_PASSWORD`` to unlock, so
+    encryption at rest defends against more than other users on the host. A
+    ``raw`` key is only file-permission protected. Returns False when there is
+    no master key file at all (nothing to warn about yet).
+    """
+    try:
+        with open(MASTERKEY_FILE) as f:
+            key_data = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return key_data.get("type", "raw") == "raw"
+
+
+def _warn_unwrapped_key() -> None:
+    """Loud one-time banner when the vault key is stored recoverably."""
+    global _WARNED_UNWRAPPED
+    if _WARNED_UNWRAPPED:
+        return
+    _WARNED_UNWRAPPED = True
+    msg = (
+        "Vault master key is stored UNWRAPPED on disk "
+        f"({MASTERKEY_FILE}).\n"
+        "  Encryption at rest only defends against other users on this host.\n"
+        "  Set LANGBOT_VAULT_PASSWORD (or re-init the vault with a password) to\n"
+        "  wrap the key, or set vault.warn_unwrapped=false to silence this."
+    )
+    try:
+        from . import console
+        console.warning(msg)
+    except Exception:  # noqa: BLE001 — never let a UI import break bootstrap
+        logger.warning(msg)
 
 
 def bootstrap() -> List[str]:
@@ -610,6 +647,9 @@ def bootstrap() -> List[str]:
     if _store.is_locked():
         logger.info("Vault is locked, skipping env auto-load")
         return []
+
+    if config.get("vault.warn_unwrapped", True) and masterkey_is_unwrapped():
+        _warn_unwrapped_key()
 
     _redactor.refresh_patterns()
 

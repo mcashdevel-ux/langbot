@@ -125,6 +125,11 @@
     "searxng_auto_clone": true
   },
 
+  "vault": {
+    "_comment": "warn_unwrapped prints a loud startup banner when the vault master key is stored recoverably on disk (no LANGBOT_VAULT_PASSWORD).",
+    "warn_unwrapped": true
+  },
+
   "routing": {
     "max_nudges_per_turn": 3,
     "recursion_limit": 300,
