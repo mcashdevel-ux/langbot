@@ -339,7 +339,9 @@ def _duplicate_of(collection, text: str, vector) -> "str | None":
     ids = (nearest.get("ids") or [[]])[0]
     metas = (nearest.get("metadatas") or [[]])[0]
     dists = (nearest.get("distances") or [[]])[0]
-    if not ids or not metas:
+    if not ids or not metas or metas[0] is None:
+        # A phantom row (id present in the index, metadata gone) must not block
+        # the write: treat it as "no duplicate" and let the caller store.
         return None
     similarity = 1.0 - float(dists[0]) if dists else 0.0
     existing = metas[0].get("text", "")
