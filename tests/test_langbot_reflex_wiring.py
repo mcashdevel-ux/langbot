@@ -37,6 +37,10 @@ def reflex_file(tmp_path, monkeypatch):
     # Re-point the already-constructed store at the new path.
 
     langbot._reflex_store = langbot._ReflexStore(path=p)
+    # These tests exercise the fast-path itself, so force it on regardless of
+    # the ambient config (a live langbot.config.json may set reflex.enabled=false
+    # to park reflexes; that must not silently turn these tests into no-ops).
+    monkeypatch.setattr(langbot, "REFLEX_ENABLED", True)
     return p
 
 

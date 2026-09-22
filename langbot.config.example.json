@@ -53,7 +53,7 @@
     ]
   },
 
-  "_distill_comment": "Memory distillation is tried on these hosted models in order, then on the local llm above. A tier is skipped when its api_key_env is unset or its published rate limits (rpm/rpd/tpm/tpd, 0 = no limit) leave no room; set \"tiers\": [] to distill locally only.",
+  "_distill_comment": "Memory distillation is tried on these hosted models in order, then on the local llm above. A tier is skipped when its api_key_env is unset or its published rate limits (rpm/rpd/tpm/tpd, 0 = no limit) leave no room; set \"tiers\": [] to distill locally only. To distill through the same endpoint as the main llm, use one tier with the llm.base_url/model above and api_key_env \"LLM_API_KEY\" (rpm/rpd/tpm/tpd 0 = unlimited).",
   "distill": {
     "cooldown_seconds": 300,
     "temperature": 0.0,
@@ -87,6 +87,12 @@
     "temperature": 0.0,
     "cooldown_seconds": 300,
     "timeout": 30
+  },
+
+  "_reflex_comment": "Procedural reflex fast-path (deterministic when-X -> do-Y rules matched before the LLM is called). Set \"enabled\": false to park it without deleting stored rules in ./memory/reflexes.json; the node still runs but never matches, so every turn goes to the LLM. min_overlap is how many trigger words must appear in the query for a rule to fire.",
+  "reflex": {
+    "enabled": true,
+    "min_overlap": 2
   },
 
   "context": {
