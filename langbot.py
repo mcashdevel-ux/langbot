@@ -139,7 +139,8 @@ from components.session_tools import (
     session_search as _session_search,
     set_current_journal as _set_current_journal,
 )
-from components.tool_call_repair import repair_message, stats as _repair_stats
+from components.tool_call_repair import (repair_message, normalize_native_calls,
+                                              stats as _repair_stats)
 from components.context import (
     KernelContext as _KernelContext,
     context_from_config as _context_from_config,
@@ -179,6 +180,11 @@ _VAULT_ENV_LOADED = _vault_bootstrap()
 # Procedural reflex store (Track D of docs/neo-port-plan.md) — deterministic
 # when-X → do-Y rules matched before the LLM is ever called.  Rules persist
 # under ./memory/reflexes.json (see components/reflex.py).
+#
+# ``reflex.enabled`` (default true) turns the fast-path off without deleting the
+# stored rules: the node still runs but never matches, so every turn goes to the
+# LLM as if no rule existed.  Set it false to park reflexes for a while.
+REFLEX_ENABLED = app_config.get("reflex.enabled", True)
 _reflex_store = _ReflexStore()
 
 # ------------------------------------------------------------------------------
@@ -760,6 +766,9 @@ def _tool_schema_tokens(selected) -> int:
 # strictly better than letting the call fail on an unexpected keyword; only
 # unambiguous synonyms belong here (nothing that could change what a call means).
 _ARG_ALIASES = {
+    "execute_shell_command": {"cmd": "command", "shell": "command",
+                              "command_line": "command", "script": "command",
+                              "run": "command", "exec": "command"},
     "recall": {"q": "query", "text": "query", "search": "query", "question": "query",
                "limit": "n", "top_k": "n", "k": "n"},
     "remember": {"text": "fact", "memory": "fact", "content": "fact", "facts": "fact",
@@ -991,6 +1000,8 @@ def reflex_node(state: AgentState):
     through to ``compact``/``agent`` as usual."""
     messages = state["messages"]
     if not messages:
+        return {}
+    if not REFLEX_ENABLED:
         return {}
     last = messages[-1]
     if not isinstance(last, HumanMessage) or is_nudge(last):
@@ -1262,6 +1273,12 @@ def tools_node(state: AgentState, config: RunnableConfig):
     """
     ctx = _ctx_for_run(config)
     messages = state["messages"]
+    # Rename wrong-but-obvious argument names on native calls (e.g. ``cmd`` ->
+    # ``command``) before dispatch. repair_message only handles calls the model
+    # wrote as *text*; a native call with a bad parameter name would otherwise
+    # fail schema validation ("command: Field required").
+    if messages and getattr(messages[-1], "tool_calls", None):
+        normalize_native_calls(messages[-1], _ARG_ALIASES)
     to_run, blocked = split_repeated_calls(messages)
     # Track F confirmation gate: gray-zone mutating calls are refused here
     # (when ``tools.confirm_mutating`` is on) before they reach the tool node.

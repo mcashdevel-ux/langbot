@@ -43,7 +43,7 @@ MAX_CANDIDATES = config.get("compat.repair_max_candidates", 20)
 # assumed: constraining decoding at the server (llama-server --jinja, which turns
 # on grammar-constrained tool calls) should drive ``recovered_calls`` to zero, and
 # that is the signal the repair layer can start shrinking. Surfaced by /health.
-_counts = {"recovered_calls": 0, "cleaned_answers": 0}
+_counts = {"recovered_calls": 0, "cleaned_answers": 0, "normalized_native_calls": 0}
 _counts_lock = threading.Lock()
 
 
@@ -297,6 +297,40 @@ def unwrap_content(text) -> "str | None":
     if not isinstance(inner, str):
         return None
     return inner.strip()
+
+
+def normalize_native_calls(message, arg_aliases=None) -> bool:
+    """Rename wrong-but-obvious argument names on a message's NATIVE tool calls.
+
+    ``repair_message`` only runs on messages with *no* native ``tool_calls`` —
+    it recovers calls the model wrote as text. A model that uses the native
+    interface correctly but gets a parameter *name* wrong (``cmd`` instead of
+    ``command``) therefore slips through untouched and the call fails schema
+    validation ("command: Field required").
+
+    This applies the same alias table to native calls, in place, before they
+    are dispatched. Returns True when any call was changed.
+    """
+    calls = getattr(message, "tool_calls", None)
+    if not calls or not arg_aliases:
+        return False
+    changed = False
+    for call in calls:
+        if not isinstance(call, dict):
+            continue
+        name = call.get("name")
+        args = call.get("args")
+        if not isinstance(name, str) or not isinstance(args, dict):
+            continue
+        renamed = _rename_args(name, args, arg_aliases)
+        if renamed != args:
+            call["args"] = renamed
+            changed = True
+    if changed:
+        logger.warning(
+            "tool_call_repair: normalized argument names on native tool call(s)")
+        _count("normalized_native_calls")
+    return changed
 
 
 def repair_message(message, valid_names, arg_aliases=None) -> bool:

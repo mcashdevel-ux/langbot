@@ -276,14 +276,67 @@ class TestStats:
         assert repair_message(msg, NAMES) is True
         # A clean answer must not move the counters, or the signal is worthless.
         assert repair_message(FakeAI("All done."), NAMES) is False
-        assert tool_call_repair.stats() == {"recovered_calls": 1, "cleaned_answers": 0}
+        assert tool_call_repair.stats() == {"recovered_calls": 1, "cleaned_answers": 0,
+                                            "normalized_native_calls": 0}
 
     def test_cleaned_answers_counted_separately(self):
         msg = FakeAI('{"content": "I have recalled the greeting.", "tool_calls": []}')
         assert repair_message(msg, NAMES) is True
-        assert tool_call_repair.stats() == {"recovered_calls": 0, "cleaned_answers": 1}
+        assert tool_call_repair.stats() == {"recovered_calls": 0, "cleaned_answers": 1,
+                                            "normalized_native_calls": 0}
 
     def test_stats_is_a_copy(self):
         snapshot = tool_call_repair.stats()
         snapshot["recovered_calls"] = 99
         assert tool_call_repair.stats()["recovered_calls"] == 0
+
+
+class TestNormalizeNativeCalls:
+    """Native calls with a wrong-but-obvious argument name must be repaired.
+
+    Regression: a model that used the native tool-calling interface correctly
+    but sent ``{"cmd": ...}`` to ``execute_shell_command`` (whose parameter is
+    ``command``) failed schema validation with "command: Field required".
+    ``repair_message`` only handles calls written as *text*, so native calls
+    were never normalized.
+    """
+
+    ALIASES = {"execute_shell_command": {"cmd": "command", "shell": "command"}}
+
+    def test_cmd_renamed_to_command(self):
+        msg = FakeAI("", tool_calls=[{"name": "execute_shell_command",
+                                      "args": {"cmd": "ls -la"},
+                                      "id": "c1", "type": "tool_call"}])
+        assert tool_call_repair.normalize_native_calls(msg, self.ALIASES) is True
+        assert msg.tool_calls[0]["args"] == {"command": "ls -la"}
+
+    def test_correct_name_untouched(self):
+        msg = FakeAI("", tool_calls=[{"name": "execute_shell_command",
+                                      "args": {"command": "ls"},
+                                      "id": "c1", "type": "tool_call"}])
+        assert tool_call_repair.normalize_native_calls(msg, self.ALIASES) is False
+        assert msg.tool_calls[0]["args"] == {"command": "ls"}
+
+    def test_correct_name_wins_when_both_present(self):
+        msg = FakeAI("", tool_calls=[{"name": "execute_shell_command",
+                                      "args": {"cmd": "wrong", "command": "right"},
+                                      "id": "c1", "type": "tool_call"}])
+        tool_call_repair.normalize_native_calls(msg, self.ALIASES)
+        assert msg.tool_calls[0]["args"] == {"command": "right"}
+
+    def test_no_tool_calls_is_a_noop(self):
+        assert tool_call_repair.normalize_native_calls(FakeAI("hi"), self.ALIASES) is False
+
+    def test_unknown_tool_untouched(self):
+        msg = FakeAI("", tool_calls=[{"name": "other_tool", "args": {"cmd": "x"},
+                                      "id": "c1", "type": "tool_call"}])
+        assert tool_call_repair.normalize_native_calls(msg, self.ALIASES) is False
+        assert msg.tool_calls[0]["args"] == {"cmd": "x"}
+
+    def test_counter_incremented(self):
+        tool_call_repair.reset_stats()
+        msg = FakeAI("", tool_calls=[{"name": "execute_shell_command",
+                                      "args": {"cmd": "ls"}, "id": "c1",
+                                      "type": "tool_call"}])
+        tool_call_repair.normalize_native_calls(msg, self.ALIASES)
+        assert tool_call_repair.stats()["normalized_native_calls"] == 1
