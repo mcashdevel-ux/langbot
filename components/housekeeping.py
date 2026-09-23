@@ -145,12 +145,20 @@ def prune_checkpoints(db_path, keep_threads=None, active_thread_id=None) -> dict
         conn.commit()
         result["threads"] = len(doomed)
 
-        # Deleting rows only frees pages inside the file; the point of the sweep is
-        # the disk back. A lock contention here is not a failure worth reporting.
+        # Deleting rows only frees pages inside the file, so the file does not
+        # shrink on its own. A full VACUUM would reclaim it, but it rewrites the
+        # whole database into a temp file while holding an exclusive lock for the
+        # entire duration — on a multi-GB checkpoint DB that is minutes, and every
+        # checkpointer write in the meantime fails with "database is locked".
+        # So the sweep never VACUUMs. Reclaiming space is an offline operation
+        # (see scripts/vacuum_checkpoints.py) run when no session is live.
+        #
+        # incremental_vacuum is safe here: it only touches the freelist, takes no
+        # long exclusive lock, and is a no-op unless auto_vacuum=INCREMENTAL.
         try:
-            conn.execute("VACUUM")
+            conn.execute("PRAGMA incremental_vacuum")
         except sqlite3.Error as e:
-            logger.info("housekeeping: skipped VACUUM (%s)", e)
+            logger.info("housekeeping: skipped incremental_vacuum (%s)", e)
     finally:
         conn.close()
     return result

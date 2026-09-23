@@ -119,6 +119,36 @@ class TestPruneCheckpoints:
         result = housekeeping.prune_checkpoints(str(tmp_path / "nope.db"))
         assert result == {"threads": 0, "rows": 0}
 
+    def test_never_vacuums(self, tmp_path, monkeypatch):
+        # Regression: a full VACUUM rewrites the whole DB under an exclusive lock,
+        # which on a multi-GB checkpoint DB means minutes of "database is locked"
+        # for every live session. The sweep must never issue one.
+        statements = []
+        real_connect = sqlite3.connect
+
+        class _RecordingConn:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def execute(self, sql, *args):
+                statements.append(sql)
+                return self._conn.execute(sql, *args)
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+        monkeypatch.setattr(
+            housekeeping.sqlite3, "connect",
+            lambda *a, **k: _RecordingConn(real_connect(*a, **k)),
+        )
+        db = _checkpoint_db(str(tmp_path / "ck.db"), ["t1", "t2", "t3"])
+        housekeeping.prune_checkpoints(db, keep_threads=1)
+        # incremental_vacuum is fine (freelist only); a bare VACUUM is not.
+        assert not any(
+            s.strip().upper() == "VACUUM" or s.strip().upper().startswith("VACUUM ")
+            for s in statements
+        )
+
     def test_unknown_schema_without_thread_id_is_left_alone(self, tmp_path):
         db = str(tmp_path / "other.db")
         conn = sqlite3.connect(db)
