@@ -261,7 +261,7 @@ Precedence for a single setting: **environment variable > config file > default.
 | `vault` | `warn_unwrapped` | print a startup banner while the master key is stored recoverably (see Security notes) |
 | `routing` | `max_nudges_per_turn`, `recursion_limit`, `stagnation_guard`, `stagnation_exempt_tools` | nudges (not tool rounds) allowed per turn; graph steps per turn (two per tool round, default `300`); repeated-call guard (see below) |
 | `compat` | `repair_json_tool_calls`, `repair_max_candidates` | recover tool calls from models that print them as text (see below) |
-| `housekeeping` | `enabled`, `scratch_max_age_days`, `scratch_max_total_mb`, `checkpoint_keep_threads` | start-up disk sweep (see below) |
+| `housekeeping` | `enabled`, `scratch_max_age_days`, `scratch_max_total_mb`, `checkpoint_keep_threads`, `checkpoint_keep_per_thread`, `checkpoint_max_mb`, `checkpoint_vacuum_on_start` | start-up disk sweep (see below) |
 
 See [`langbot.config.example.json`](./langbot.config.example.json) for every key with its
 default value.
@@ -372,9 +372,12 @@ Set `routing.stagnation_guard` to `false` to execute everything.
 
 ### Disk housekeeping
 
-Two stores would otherwise grow forever: scratch entries are never truncated and never
-deleted, and every start (and every `/new`) mints a checkpoint thread nobody resumes. On a
-machine that runs the agent for weeks, both fill the disk silently.
+Three things would otherwise grow forever: scratch entries are never truncated and never
+deleted; every start (and every `/new`) mints a checkpoint thread nobody resumes; and the
+checkpointer stores a **full snapshot of the whole message history on every super-step**,
+so a single long session is O(N²) on its own. On a machine that runs the agent for weeks,
+all three fill the disk silently. (Measured here: one 18-hour session accounted for 87% of
+a 10 GB checkpoint store — see `docs/sitrep-2026-09-23-checkpoint-db-lock.md`.)
 
 So one sweep runs per start, on the warmup thread rather than the interactive loop
 (`components/housekeeping.py`):
@@ -383,12 +386,25 @@ So one sweep runs per start, on the warmup thread rather than the interactive lo
 |---------|---------|--------|
 | `scratch_max_age_days` | `7` | scratch entries older than this are deleted |
 | `scratch_max_total_mb` | `512` | after the age pass, oldest entries go until the directory fits |
-| `checkpoint_keep_threads` | `20` | checkpoint threads kept besides the active one; the rest are deleted and the DB `VACUUM`ed |
+| `checkpoint_keep_threads` | `20` | checkpoint threads kept besides the active one; the rest are deleted |
+| `checkpoint_keep_per_thread` | `20` | checkpoints kept in the *active* thread; older snapshots are deleted |
+| `checkpoint_max_mb` | `1024` | size backstop: a fatter thread keeps halving its history until it fits (`0` off) |
+| `checkpoint_vacuum_on_start` | `true` | rewrite the checkpoint DB once at start so freed pages return to the filesystem |
 | `prune_age_days` | `90` | distilled (non-manual) facts older than this with low confidence are pruned |
 
-The active thread is never pruned, recent scratch entries are kept regardless of size, and
-`0` disables either cap.  Manual memory facts (`/save`) are never pruned.  `/health` reports
-what the last sweep freed.  Set `housekeeping.enabled` to `false` to keep everything.
+The active thread is never deleted, but its *oldest* checkpoints are: resuming replays
+from the newest one, so trimming older snapshots costs no state the user can reach. Recent
+scratch entries are kept regardless of size, and `0` disables either cap.  Manual memory
+facts (`/save`) are never pruned.  `/health` reports what the last sweep freed.  Set
+`housekeeping.enabled` to `false` to keep everything.
+
+A running session holds the DB, so the sweep prunes rows but cannot return the freed
+pages to the filesystem without a full `VACUUM` (which takes an exclusive lock for the
+whole rewrite). `checkpoint_vacuum_on_start` does it once at start-up, on the warmup
+thread, before the checkpointer is busy — that is safe, and it is what keeps the file
+from staying at its high-water mark. For the same reason, a *running* session's
+overhead is not reclaimed at all: that is what `scripts/vacuum_checkpoints.py` is for
+(`--thread <id>` also trims that thread's history first).
 
 ### Serve tool calls, don't repair them
 
@@ -606,7 +622,7 @@ components/
   logging_setup.py      # routes log records to ./memory/langbot.log, off the REPL
   tool_call_repair.py   # recovers tool calls from models that emit them as text
   scratch.py            # shared on-disk scratchpad + read_scratch paging
-  housekeeping.py       # start-up sweep: old scratch entries, abandoned checkpoint threads
+  housekeeping.py       # start-up sweep: old scratch, abandoned threads, fat histories
   memory_store.py       # embeddings + Chroma collection (store/recall, write lock)
   memory_worker.py      # background distillation queue (off the graph's critical path)
   fallback_llm.py       # tiered distillation LLM: hosted models (rate-limit aware) then local

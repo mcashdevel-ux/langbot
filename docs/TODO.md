@@ -49,6 +49,11 @@ The signal is `/health` showing `tool-call repairs: 0 recovered`.
 
 ## 4. Eval-harness live run (needs one live session)
 
+> **Closed since this list was written:** the unbounded intra-thread checkpoint growth
+> (sitrep 2026-09-23, root cause B) is fixed — the start-up sweep now trims the live
+> thread's oldest snapshots (`housekeeping.checkpoint_keep_per_thread` / `checkpoint_max_mb`)
+> and vacuums once at start. See `docs/sitrep-2026-09-24-checkpoint-growth-fix.md`.
+
 The harness uses canned LLM responses. Run 3 critical eval tasks against your live model
 and compare real results to expectations:
 
@@ -86,3 +91,4 @@ and compare real results to expectations:
 | #38 | Stagnation guard for repeated tool calls |
 | #39 | Prompt composition stats in `/health` |
 | #41 | SearXNG clone logging, pooled HTTP session, vault masking |
+| #46 | Bound intra-thread checkpoint growth: trim the live thread's oldest snapshots + start-up vacuum (`prune_thread_history`) |

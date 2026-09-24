@@ -207,12 +207,17 @@ llm = ChatOpenAI(
 # start. It goes first so it is done before the checkpointer is busy.
 _active_thread_id = None
 _sweep_summary = "pending"
+# A start-up sweep runs before this session's checkpointer is busy, so it may take
+# the exclusive lock a full VACUUM needs to actually shrink the file. Pruning rows
+# alone frees pages inside the file without returning them to the filesystem.
+_sweep_vacuum = app_config.get("housekeeping.checkpoint_vacuum_on_start", True)
 
 
 def _sweep_disk() -> None:
     global _sweep_summary
     _sweep_summary = _housekeeping.sweep(
-        _scratch.SCRATCH_DIR, SQLITE_DB_PATH, _active_thread_id
+        _scratch.SCRATCH_DIR, SQLITE_DB_PATH, _active_thread_id,
+        checkpoint_vacuum=_sweep_vacuum,
     )
 
 

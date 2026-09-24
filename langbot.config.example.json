@@ -152,6 +152,9 @@
     "enabled": true,
     "scratch_max_age_days": 7,
     "scratch_max_total_mb": 512,
-    "checkpoint_keep_threads": 20
+    "checkpoint_keep_threads": 20,
+    "checkpoint_keep_per_thread": 20,
+    "checkpoint_max_mb": 1024,
+    "checkpoint_vacuum_on_start": true
   }
 }

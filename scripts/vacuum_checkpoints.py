@@ -21,6 +21,10 @@ import os
 import sqlite3
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from components import housekeeping  # noqa: E402
+
 DEFAULT_DB = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "memory",
@@ -54,11 +58,34 @@ def vacuum(db_path: str, timeout: float = 0.0) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("db", nargs="?", default=DEFAULT_DB, help="checkpoint DB path")
+    ap.add_argument(
+        "--thread", default=None,
+        help="also trim this thread to its newest checkpoints before vacuuming "
+             "(offline counterpart of the start-up history sweep)",
+    )
+    ap.add_argument(
+        "--keep", type=int, default=housekeeping.CHECKPOINT_KEEP_PER_THREAD,
+        help="checkpoints to keep per thread when --thread is given "
+             f"(default {housekeeping.CHECKPOINT_KEEP_PER_THREAD})",
+    )
     args = ap.parse_args()
 
     if not os.path.exists(args.db):
         print(f"no such database: {args.db}", file=sys.stderr)
         return 1
+
+    if args.thread:
+        try:
+            trimmed = housekeeping.prune_thread_history(
+                args.db, active_thread_id=args.thread, keep=args.keep, max_mb=0,
+            )
+        except sqlite3.OperationalError as e:
+            print(f"refusing to trim: {e}\nStop langbot first.", file=sys.stderr)
+            return 2
+        print(
+            f"trimmed {trimmed['rows']} row(s) of {args.thread}, "
+            f"kept {trimmed['kept']}"
+        )
 
     try:
         freed = vacuum(args.db)

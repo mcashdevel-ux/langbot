@@ -21,6 +21,13 @@ This directory contains additional documentation for langbot.
 | [langbot-upgrade-plan.md](langbot-upgrade-plan.md) | Version upgrade roadmap |
 | [langbot-architecture-review.md](langbot-architecture-review.md) | Self-analysis of the agent: graph, safety, memory, routing, context |
 
+### Situation reports
+
+| Document | Description |
+|----------|-------------|
+| [sitrep-2026-09-23-checkpoint-db-lock.md](sitrep-2026-09-23-checkpoint-db-lock.md) | "database is locked" + 30 GB of checkpoint growth: causes |
+| [sitrep-2026-09-24-checkpoint-growth-fix.md](sitrep-2026-09-24-checkpoint-growth-fix.md) | The follow-up fix: intra-thread trimming, verified live |
+
 ## Quick Links
 
 - [README.md](../README.md) - Main project documentation
