@@ -92,3 +92,4 @@ and compare real results to expectations:
 | #39 | Prompt composition stats in `/health` |
 | #41 | SearXNG clone logging, pooled HTTP session, vault masking |
 | #46 | Bound intra-thread checkpoint growth: trim the live thread's oldest snapshots + start-up vacuum (`prune_thread_history`) |
+| #47 | Show model reasoning: recover the dropped `reasoning_content` field (`ReasoningChatOpenAI`), split inline think tags properly, reasoning-token accounting, intent subtitle on tool results |

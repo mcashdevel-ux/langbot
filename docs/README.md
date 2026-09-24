@@ -27,6 +27,7 @@ This directory contains additional documentation for langbot.
 |----------|-------------|
 | [sitrep-2026-09-23-checkpoint-db-lock.md](sitrep-2026-09-23-checkpoint-db-lock.md) | "database is locked" + 30 GB of checkpoint growth: causes |
 | [sitrep-2026-09-24-checkpoint-growth-fix.md](sitrep-2026-09-24-checkpoint-growth-fix.md) | The follow-up fix: intra-thread trimming, verified live |
+| [sitrep-2026-09-24-reasoning-not-shown.md](sitrep-2026-09-24-reasoning-not-shown.md) | The console showed no reasoning: a dropped provider field + a one-channel renderer |
 
 ## Quick Links
 
