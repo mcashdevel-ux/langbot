@@ -748,7 +748,7 @@ def tool_call_panel(name: str, args: dict = None):
 
 
 def tool_result_panel(name: str, content: str, is_error: bool = False,
-                         elapsed_ms: int = 0):
+                         elapsed_ms: int = 0, reason: str = ""):
     """Render the (possibly truncated) result returned by a tool.
 
     Args:
@@ -756,6 +756,9 @@ def tool_result_panel(name: str, content: str, is_error: bool = False,
         content: The result text.
         is_error: Style as an error panel.
         elapsed_ms: Time the tool took, shown in the panel title.
+        reason: Why the call was made — the reasoning text that preceded it.
+            Rendered as the panel's subtitle, so a result is read in the context
+            of the intent behind it instead of as an unexplained blob.
     """
     icon, _ = _tool_icon(name)
     text = content if isinstance(content, str) else str(content)
@@ -770,8 +773,13 @@ def tool_result_panel(name: str, content: str, is_error: bool = False,
     status = "✗" if is_error else "✓"
     timing = (f" ({elapsed_ms}ms)" if elapsed_ms < 2000
               else f" ({elapsed_ms/1000:.1f}s)" if elapsed_ms else "")
+    subtitle = ""
+    if reason:
+        # One line only: the subtitle is context, not a second thought panel.
+        line = " ".join(str(reason).split())
+        subtitle = line if len(line) <= 120 else line[:117] + "..."
     panel(title=f"{status} {icon} {name}{timing}", content=text,
-          border_style="red" if is_error else "blue")
+          subtitle=subtitle, border_style="red" if is_error else "blue")
 
 
 def final_answer_panel(content: str):

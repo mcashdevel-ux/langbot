@@ -7,7 +7,9 @@
     "temperature": 0.1,
     "max_retries": 10,
     "_thinking_mode_comment": "\"auto\" lets the model decide; \"off\" appends /no_think to suppress reasoning blocks; \"on\" appends /think to explicitly request them. Only meaningful for Qwen3-family models.",
-    "thinking_mode": "auto"
+    "thinking_mode": "auto",
+    "_show_thinking_comment": "Render a step's reasoning as a Thought panel. Turn it off to quiet a long session; it does not turn reasoning itself off (that is thinking_mode).",
+    "show_thinking": true
   },
 
   "paths": {

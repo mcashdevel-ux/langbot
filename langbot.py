@@ -44,7 +44,6 @@ from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
-from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, START, END, MessagesState
 from langgraph.prebuilt import ToolNode, tools_condition
 
@@ -104,6 +103,10 @@ from components import (
 )
 from components import context_budget as _ctx
 from components import housekeeping as _housekeeping
+from components import tool_call_repair as _repair_mod
+from components.utils import thinking_content as _thinking_content
+from components.utils import reasoning_tokens as _reasoning_tokens
+from components.llm_reasoning import ReasoningChatOpenAI as _ChatOpenAI
 from components.tool_router import (
     select_tools as _select_tools,
     register as _register_plugin_tools,
@@ -169,6 +172,11 @@ LLM_API_KEY = app_config.get("llm.api_key", "not-needed", env="LLM_API_KEY")
 LLM_TEMPERATURE = app_config.get("llm.temperature", 0.1, env="LLM_TEMPERATURE")
 LLM_MAX_RETRIES = app_config.get("llm.max_retries", 10)
 THINKING_MODE = app_config.get("llm.thinking_mode", "auto")
+# Whether a step's reasoning is rendered as a Thought panel. The reasoning is
+# worth showing — it is where a wrong answer explains itself — but on a long
+# session it is a lot of scrolling, and the answer is what you are waiting for.
+# Turning this off does *not* turn reasoning off; that is llm.thinking_mode.
+SHOW_THINKING = app_config.get("llm.show_thinking", True)
 SQLITE_DB_PATH = app_config.get("paths.checkpoint_db", "./memory/agent_checkpoints.db")
 
 # ------------------------------------------------------------------------------
@@ -190,7 +198,7 @@ _reflex_store = _ReflexStore()
 # ------------------------------------------------------------------------------
 # 1. LLM & Embeddings
 # ------------------------------------------------------------------------------
-llm = ChatOpenAI(
+llm = _ChatOpenAI(
     model=LLM_MODEL,
     base_url=BASE_URL,
     api_key=LLM_API_KEY,
@@ -881,8 +889,24 @@ def agent(state: AgentState):
     # Small local models often print the call they meant to make instead of
     # using the tool-calling channel; recover those so they actually execute.
     repair_message(response, _TOOL_NAMES, _ARG_ALIASES)
-    # Track tokens the model spent in <think> blocks that get stripped for display.
-    _ctx.record_thinking_tokens(response.content if hasattr(response, "content") else "")
+    # Track tokens the model spent reasoning. Prefer the provider's own count:
+    # reasoning arriving in a separate ``reasoning_content`` field is not in
+    # ``content`` at all, so the text heuristic would score it as zero.
+    reported = _reasoning_tokens(response)
+    if reported:
+        _ctx.record_reasoning_tokens(reported)
+    else:
+        _ctx.record_thinking_tokens(response.content if hasattr(response, "content") else "")
+    # The Thought panel is rendered from the streamed message (see _render_message),
+    # so reasoning has to survive the round trip through the checkpointer. A
+    # provider field that ChatOpenAI drops would not, so it is copied into the
+    # message's additional_kwargs — which is what lets a resumed session keep
+    # showing the reasoning it already has.
+    if SHOW_THINKING:
+        reasoning = _thinking_content(response)
+        kwargs = getattr(response, "additional_kwargs", None)
+        if reasoning and isinstance(kwargs, dict) and not kwargs.get("reasoning_content"):
+            kwargs["reasoning_content"] = reasoning
     return {"messages": [response]}
 
 # ------------------------------------------------------------------------------
@@ -1289,6 +1313,11 @@ def tools_node(state: AgentState, config: RunnableConfig):
     # fail schema validation ("command: Field required").
     if messages and getattr(messages[-1], "tool_calls", None):
         normalize_native_calls(messages[-1], _ARG_ALIASES)
+    # Why the model called these tools: the reasoning on the message that asked for
+    # them. Recorded here rather than sent to the model — the model has no reason to
+    # read its own narration back, and repeating it every round is quadratic cost.
+    if messages:
+        _record_tool_reason(_thinking_content(messages[-1]))
     to_run, blocked = split_repeated_calls(messages)
     # Track F confirmation gate: gray-zone mutating calls are refused here
     # (when ``tools.confirm_mutating`` is on) before they reach the tool node.
@@ -1422,39 +1451,53 @@ builder.add_edge("distill", END)
 # ------------------------------------------------------------------------------
 # 8. Execution Loop
 # ------------------------------------------------------------------------------
+# The reasoning behind the tool calls of the *current* step, for the result panels
+# only. Kept out of message state on purpose: the model has no reason to read its own
+# narration back, and repeating it every round is quadratic prompt cost — so this is
+# presentation state, cleared per turn and never persisted.
+_tool_reason: str = ""
+
+
+def _record_tool_reason(text: str) -> None:
+    """Remember why the pending tool calls were made (one step's reasoning)."""
+    global _tool_reason
+    cleaned = " ".join(str(text or "").split())
+    _tool_reason = cleaned[:400]
+
+
 def _render_message(msg) -> None:
     """Surface a single streamed graph message as a live Rich panel.
 
+    - AI message carrying reasoning         -> "Thought" panel (rendered first,
+      so the narration reads before the thing it explains)
     - AI message with content + tool calls  -> intermediate "Thought" panel
     - AI message with content, no tool calls -> final "Answer" panel (Markdown)
     - AI tool calls                          -> "Tool Call" panel(s)
     - Tool message                           -> "Tool Result" panel
+
+    Reasoning arrives on one of two channels and both are handled: inside the
+    content as think tags (Qwen-family models), or out of band in a
+    ``reasoning_content`` field (DeepSeek/OpenRouter-style OpenAI-compatible
+    endpoints — what the hosted proxy returns). The out-of-band field is exactly
+    what ``langchain_openai.ChatOpenAI`` drops by design, so a panel is the only
+    place it can surface at all.
     """
     mtype = getattr(msg, "type", None)
 
     if mtype == "ai":
         tool_calls = getattr(msg, "tool_calls", None) or []
-        content = msg.content
-        if content:
-            text = _vault_redact(content if isinstance(content, str) else str(content))
-            # Qwen-family models put reasoning in <think> blocks; same treatment.
-            text = text.replace("<think>", "<thought>").replace("</think>", "</thought>")
-            if "<thought>" in text and "</thought>" in text:
-                parts = text.split("</thought>")
-                thought_part = parts[0].replace("<thought>", "").strip()
-                ans_part = parts[1].strip() if len(parts) > 1 else ""
-                if thought_part:
-                    ui.thought_panel(thought_part)
-                if ans_part:
-                    if tool_calls:
-                        ui.thought_panel(ans_part)
-                    else:
-                        ui.final_answer_panel(ans_part)
+        raw = msg.content if isinstance(msg.content, str) else str(msg.content)
+        text = _vault_redact(raw)
+        # Qwen-family models put reasoning in think tags inside the content.
+        inline_thought, text = _repair_mod.inline_reasoning(text)
+        thought = _thinking_content(msg) or inline_thought
+        if thought and SHOW_THINKING:
+            ui.thought_panel(thought)
+        if text:
+            if tool_calls:
+                ui.thought_panel(text)
             else:
-                if tool_calls:
-                    ui.thought_panel(text)
-                else:
-                    ui.final_answer_panel(text)
+                ui.final_answer_panel(text)
         for call in tool_calls:
             ui.tool_call_panel(call.get("name", "tool"), call.get("args") or {})
 
@@ -1462,7 +1505,9 @@ def _render_message(msg) -> None:
         # tools_node has already redacted stored secrets from non-vault output.
         content = msg.content if isinstance(msg.content, str) else str(msg.content)
         is_error = getattr(msg, "status", None) == "error"
-        ui.tool_result_panel(getattr(msg, "name", None) or "tool", content, is_error=is_error)
+        ui.tool_result_panel(getattr(msg, "name", None) or "tool", content,
+                             is_error=is_error,
+                             reason=_tool_reason if SHOW_THINKING else "")
 
 
 def _stream_turn(app, config, user_input: str) -> None:
@@ -1491,6 +1536,8 @@ def _stream_turn(app, config, user_input: str) -> None:
     # Point the session tools at this turn's journal (cleared on exit so a
     # stale journal can't leak across turns).
     _set_current_journal(_current_journal)
+    global _tool_reason
+    _tool_reason = ""
     try:
         for chunk in app.stream(
             {"messages": [HumanMessage(content=user_input)]},

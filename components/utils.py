@@ -29,6 +29,92 @@ def truncate(text: str, max_chars: int = MAX_OUTPUT_CHARS,
     return text
 
 
+def thinking_content(response) -> str:
+    """Return a response's reasoning text, whichever channel it arrived on.
+
+    Providers that support reasoning split it out of the answer, and each does so
+    differently: an OpenAI-compatible endpoint (DeepSeek, vLLM, OpenRouter, …)
+    puts it in ``reasoning_content`` / ``reasoning`` — either on the message or
+    nested under ``provider_specific_fields`` — and some wrap it as a content
+    *block* (``{"type": "thinking", …}``). ``ChatOpenAI`` drops the top-level
+    fields entirely (its documented scope is the official OpenAI schema), but a
+    subclass or a future version keeps them in ``additional_kwargs``, so all of
+    those shapes are checked.
+
+    Returns ``""`` when the response carries no reasoning, so callers can skip
+    rendering without inspecting the shape themselves.
+    """
+    def _first_text(value) -> str:
+        """Pull prose out of a str / list-of-blocks / dict-shaped field."""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, dict):
+            for key in ("text", "reasoning", "reasoning_content", "reasoning_details",
+                        "content"):
+                found = _first_text(value.get(key))
+                if found:
+                    return found
+            return ""
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                found = _first_text(item)
+                if found:
+                    return found
+            return ""
+        return ""
+
+    sources = []
+    for holder in (response, getattr(response, "additional_kwargs", None)):
+        if not holder:
+            continue
+        if isinstance(holder, dict):
+            sources.append(holder)
+            continue
+        for attr in ("reasoning_content", "reasoning", "provider_specific_fields"):
+            value = getattr(holder, attr, None)
+            if value:
+                sources.append(value)
+
+    for source in sources:
+        if isinstance(source, dict):
+            for key in ("reasoning_content", "reasoning", "reasoning_details",
+                        "provider_specific_fields"):
+                found = _first_text(source.get(key))
+                if found:
+                    return found
+        else:
+            found = _first_text(source)
+            if found:
+                return found
+
+    content = getattr(response, "content", None)
+    if isinstance(content, (list, tuple)):
+        for block in content:
+            if isinstance(block, dict) and "think" in str(block.get("type", "")):
+                found = _first_text(block)
+                if found:
+                    return found
+    return ""
+
+
+def reasoning_tokens(response) -> int:
+    """Provider-reported reasoning tokens for a response, or 0 if unreported.
+
+    ``usage_metadata`` carries them under ``output_token_details.reasoning`` on
+    the hosted proxy; a local llama.cpp server reports nothing at all.
+    """
+    usage = getattr(response, "usage_metadata", None) or {}
+    details = {}
+    if isinstance(usage, dict):
+        details = usage.get("output_token_details") or {}
+    else:                                    # pydantic UsageMetadata
+        details = getattr(usage, "output_token_details", None) or {}
+    try:
+        return int((details or {}).get("reasoning") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def strip_code_fences(raw: str) -> str:
     """Strip a leading/trailing Markdown code fence from a model reply.
 

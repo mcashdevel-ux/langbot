@@ -356,6 +356,25 @@ def record_thinking_tokens(text: str) -> None:
         _stats["thinking_calls"] += 1
 
 
+def record_reasoning_tokens(count: int) -> None:
+    """Record reasoning tokens a provider *reported* for this step.
+
+    Preferred over :func:`record_thinking_tokens` when available: the provider
+    counts what the model actually generated, whereas the text heuristic only sees
+    reasoning that arrives inside the content — a separate ``reasoning_content``
+    field is not part of that text and would otherwise be counted as zero.
+    """
+    try:
+        count = int(count or 0)
+    except (TypeError, ValueError):
+        return
+    if count <= 0:
+        return
+    with _stats_lock:
+        _stats["thinking_tokens"] += count
+        _stats["thinking_calls"] += 1
+
+
 def stats_summary() -> str:
     """One line for `/health`, aimed at the two open questions: is the reserve the
     right size, and what is compaction costing the prompt cache?"""

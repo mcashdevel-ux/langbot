@@ -92,6 +92,29 @@ def _clean_markup(text: str) -> str:
     return _BLANK_RUN_RE.sub("\n\n", _MARKUP_RE.sub("", text)).strip()
 
 
+def inline_reasoning(text: str) -> "tuple[str, str]":
+    """Split ``(reasoning, answer)`` out of content carrying an inline think block.
+
+    Qwen-family models (and any server that leaves the tags in place) put their
+    reasoning inside ``content``. Callers that want to *show* the reasoning use
+    this; callers that want the payload use :func:`strip_reasoning`.
+
+    An unclosed tag means the generation was cut off mid-thought, so everything
+    from the tag on is reasoning and the answer is empty.
+    """
+    if not isinstance(text, str) or "<think" not in text:
+        return "", text if isinstance(text, str) else ""
+    closed = re.search(r"<think(?:ing)?>(.*?)</think(?:ing)?>", text, re.DOTALL)
+    if closed:
+        reasoning = closed.group(1)
+        answer = (text[:closed.start()] + text[closed.end():])
+        return reasoning.strip(), _clean_markup(answer)
+    opened = re.search(r"<think(?:ing)?>(.*)\Z", text, re.DOTALL)
+    if opened:
+        return opened.group(1).strip(), _clean_markup(text[:opened.start()])
+    return "", text
+
+
 def strip_reasoning(text: str) -> str:
     """Drop ``<think>`` blocks and leaked markup.
 

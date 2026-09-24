@@ -256,6 +256,7 @@ Precedence for a single setting: **environment variable > config file > default.
 | `tools` (binding) | `dynamic_binding`, `core` | which tool schemas are sent each step (see below) |
 | `web` | `search_snippet_chars`, `search_max_results`, `fetch_inline_chars`, `jina_timeout`, `jina_retry_on_429`, `searxng_settings_path`, `searxng_source_dir`, `searxng_auto_clone` | search/fetch behaviour; `searxng_auto_clone` allows the first search to clone the SearXNG source if it isn't found (set `false` to require it be present) |
 | `llm` (new) | `thinking_mode` | `"auto"` lets the model decide; `"off"` appends `/no_think` to suppress reasoning blocks; `"on"` explicitly requests them |
+| `llm` (new) | `show_thinking` | render each step's reasoning as a Thought panel (default `true`); does not affect whether the model reasons |
 | `tools` (binding) | `embedding_routing`, `embedding_threshold` | embedding-based tool selection (on by default); threshold for cosine similarity (default 0.35) |
 | `memory` (pruning) | `prune_age_days`, `prune_confidence_threshold`, `default_manual_confidence`, `default_distilled_confidence` | automatic removal of stale low-confidence facts; confidence defaults for manual vs distilled facts |
 | `vault` | `warn_unwrapped` | print a startup banner while the master key is stored recoverably (see Security notes) |
