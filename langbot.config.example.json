@@ -157,6 +157,8 @@
     "checkpoint_keep_threads": 20,
     "checkpoint_keep_per_thread": 20,
     "checkpoint_max_mb": 1024,
+    "_checkpoint_max_thread_mb_comment": "Per-thread ceiling applied to EVERY thread, including abandoned ones that are still too recent for checkpoint_keep_threads to drop. Without it a single runaway session is bounded by nothing and can hold gigabytes indefinitely (measured: 9 GB, 87% of a 10 GB store). The newest checkpoint always survives. 0 disables.",
+    "checkpoint_max_thread_mb": 256,
     "checkpoint_vacuum_on_start": true
   }
 }

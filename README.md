@@ -389,7 +389,8 @@ So one sweep runs per start, on the warmup thread rather than the interactive lo
 | `scratch_max_total_mb` | `512` | after the age pass, oldest entries go until the directory fits |
 | `checkpoint_keep_threads` | `20` | checkpoint threads kept besides the active one; the rest are deleted |
 | `checkpoint_keep_per_thread` | `20` | checkpoints kept in the *active* thread; older snapshots are deleted |
-| `checkpoint_max_mb` | `1024` | size backstop: a fatter thread keeps halving its history until it fits (`0` off) |
+| `checkpoint_max_mb` | `1024` | size backstop for the active thread: keeps halving its history until it fits (`0` off) |
+| `checkpoint_max_thread_mb` | `256` | per-thread ceiling applied to **every** thread, including abandoned ones; newest checkpoint always kept (`0` off) |
 | `checkpoint_vacuum_on_start` | `true` | rewrite the checkpoint DB once at start so freed pages return to the filesystem |
 | `prune_age_days` | `90` | distilled (non-manual) facts older than this with low confidence are pruned |
 
@@ -398,6 +399,16 @@ from the newest one, so trimming older snapshots costs no state the user can rea
 scratch entries are kept regardless of size, and `0` disables either cap.  Manual memory
 facts (`/save`) are never pruned.  `/health` reports what the last sweep freed.  Set
 `housekeeping.enabled` to `false` to keep everything.
+
+Two bounds apply to checkpoints, because they answer different questions. The thread
+sweep (`checkpoint_keep_threads`) bounds *how many* threads survive but keeps them
+whatever their size; the history sweeps bound *how large* a thread gets. The per-thread
+ceiling (`checkpoint_max_thread_mb`) is the one that applies to every thread, not just the
+active one — a thread that is abandoned yet still recent enough to keep is bounded by
+neither of the others, and one runaway session can otherwise hold gigabytes indefinitely
+(measured: 9 GB, 87% of a 10 GB store). A thread over the ceiling is trimmed to
+`checkpoint_keep_per_thread` checkpoints, halving further until it fits or a single row
+remains; the newest checkpoint always survives.
 
 A running session holds the DB, so the sweep prunes rows but cannot return the freed
 pages to the filesystem without a full `VACUUM` (which takes an exclusive lock for the

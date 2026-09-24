@@ -5,6 +5,34 @@ status; this file holds the *work*, including items that were never review findi
 
 ---
 
+## 0. One thread ate the disk — closed, with a caveat
+
+A single long session reached **9 GB** (87% of a 10 GB checkpoint store; see
+`docs/sitrep-2026-09-23-checkpoint-db-lock.md`). Root cause B was "fixed" by
+`prune_thread_history`, but that only bounds the **active** thread, and
+`prune_checkpoints` keeps the newest 20 threads whatever their size — so a fat thread
+that is abandoned yet still recent was bounded by **nothing**. Verified live: a 263 MB
+thread survived a full sweep untouched (`0 threads, 0 rows`).
+
+- [x] `prune_fat_threads()` — a per-thread ceiling applied to *every* thread
+  (`housekeeping.checkpoint_max_thread_mb`, default 256). Over-budget threads are
+  trimmed to `checkpoint_keep_per_thread`, halving until they fit or one row remains;
+  the newest checkpoint always survives, so a resume still replays from valid state.
+- [x] Verified against a copy of the live DB: 263 MB → 13.5 MB, 122 MB → 17.4 MB
+  (2,299 rows) in one sweep.
+- [x] Verified against the real O(N²) shape: a 1,351 MB single-session thread
+  → 35.8 MB in 2.1 s, newest checkpoint kept.
+- [x] `tests/test_housekeeping_fat_threads.py` (16 tests). Suite: **848 passed**.
+
+**Still open — the file does not shrink.** Deleting rows only frees pages *inside*
+the file; the 9 GB thread leaves a 9 GB file, and the WAL cannot be truncated while a
+session holds the DB. Reclamation is offline only:
+
+- [ ] Run `python scripts/vacuum_checkpoints.py` with no session live to actually
+  return the space (the live PID holds the DB today).
+
+---
+
 ## 1. Vault default — C3 (no live model, needs a decision)
 
 The vault master key is stored recoverably on disk (`./memory/vault/.masterkey`).

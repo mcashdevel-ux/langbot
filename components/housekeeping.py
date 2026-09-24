@@ -16,10 +16,18 @@ until the disk is full:
 So a sweep runs once per start, on the warmup thread (never on the interactive
 loop). Each part is deliberately conservative: the scratch sweep keeps anything
 recent regardless of size, the thread sweep keeps the newest threads plus the one
-in use, and the history sweep trims only the *oldest* checkpoints of the thread in
-use — resuming replays from the newest one, so deleting older snapshots costs no
-state the user can reach. Deleting state the user still wants is worse than keeping
+in use, and the history sweeps trim only the *oldest* checkpoints of a thread —
+resuming replays from the newest one, so deleting older snapshots costs no state
+the user can reach. Deleting state the user still wants is worse than keeping
 bytes they don't.
+
+Three bounds, not two, and the third is the one that matters most. The thread
+sweep bounds how many threads survive but keeps them whatever their size; the
+live-thread sweep bounds the size of the thread in use. Neither touches a thread
+that is *abandoned yet still recent enough to keep* — so one runaway session could
+sit at 9 GB indefinitely, which is exactly what happened. The per-thread ceiling
+(``prune_fat_threads``) closes that: every thread over ``checkpoint_max_thread_mb``
+is trimmed to its newest checkpoints, oldest first.
 
 Recency for checkpoints comes from ``rowid`` order rather than a timestamp: the
 checkpointer's schema stores none, and ``thread_id`` is only sometimes derived from
@@ -52,6 +60,16 @@ CHECKPOINT_KEEP_PER_THREAD = config.get("housekeeping.checkpoint_keep_per_thread
 # CHECKPOINT_KEEP_PER_THREAD rows, keep halving the keep-count until it fits or
 # one row remains. 0 disables the backstop.
 CHECKPOINT_MAX_MB = config.get("housekeeping.checkpoint_max_mb", 1024)
+# Per-thread size budget, applied to *every* thread rather than only the live one.
+# Neither bound above can stop one abandoned thread from holding gigabytes: the
+# thread sweep keeps the newest CHECKPOINT_KEEP_THREADS threads whatever their size,
+# and the history sweep only looks at the active thread. So a fat thread that is
+# neither active nor old enough to be pruned is never trimmed at all. Measured: a
+# single 18-hour session reached 9 GB (87% of a 10 GB store, see
+# docs/sitrep-2026-09-23-checkpoint-db-lock.md), and 263 MB here in a thread that
+# was neither in use nor old enough to drop. This is the backstop that makes "one
+# thread eats the disk" impossible. 0 disables it.
+CHECKPOINT_MAX_THREAD_MB = config.get("housekeeping.checkpoint_max_thread_mb", 256)
 
 DAY = 86400.0
 
@@ -186,6 +204,152 @@ def prune_checkpoints(db_path, keep_threads=None, active_thread_id=None) -> dict
     return result
 
 
+def _trim_thread(conn, tables, thread_id, keep_n, by_checkpoint_id) -> int:
+    """Keep the ``keep_n`` newest checkpoints of ``thread_id``, delete the rest.
+
+    Rows are ranked by ``rowid``: the checkpointer schema stores no timestamp, and
+    rowid order is insertion order, which is what recency means here. The ``writes``
+    rows are deleted with their checkpoint — a write whose checkpoint is gone is
+    unreachable state. A table carrying ``thread_id`` but no ``checkpoint_id``
+    (schema drift) is trimmed by rowid instead, so the "sweep every table that
+    carries thread state" rule holds.
+    """
+    if by_checkpoint_id:
+        safe = [
+            row[0] for row in conn.execute(
+                'SELECT checkpoint_id FROM "checkpoints" '
+                "WHERE thread_id = ? ORDER BY rowid DESC LIMIT ?",
+                (thread_id, keep_n),
+            )
+        ]
+        if not safe:
+            return 0
+        placeholders = ", ".join("?" for _ in safe)
+    deleted = 0
+    for table in tables:
+        columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
+        if by_checkpoint_id and "checkpoint_id" in columns:
+            cursor = conn.execute(
+                f'DELETE FROM "{table}" WHERE thread_id = ? '
+                f"AND checkpoint_id NOT IN ({placeholders})",
+                (thread_id, *safe),
+            )
+        else:                               # schema drift: trim by recency instead
+            cursor = conn.execute(
+                f'DELETE FROM "{table}" WHERE thread_id = ? AND rowid NOT IN ('
+                f'SELECT rowid FROM "{table}" WHERE thread_id = ? '
+                "ORDER BY rowid DESC LIMIT ?)",
+                (thread_id, thread_id, keep_n),
+            )
+        deleted += cursor.rowcount or 0
+    conn.commit()
+    return deleted
+
+
+def _thread_bytes(conn, thread_id) -> int:
+    """Bytes of checkpoint blobs held by one thread, on an open connection."""
+    row = conn.execute(
+        'SELECT COALESCE(SUM(LENGTH(checkpoint)), 0) FROM "checkpoints" '
+        "WHERE thread_id = ?", (thread_id,),
+    ).fetchone()
+    return row[0] if row else 0
+
+
+def thread_blob_bytes(db_path) -> dict:
+    """Map ``thread_id`` → bytes of checkpoint blobs it holds, biggest first.
+
+    Used to find the threads worth trimming: the total file size is dominated by a
+    handful of threads, and a thread's *row count* is a poor proxy for its size
+    because every row snapshots the whole history (so a long session's rows are far
+    fatter than a short one's).
+    """
+    sizes = {}
+    if not db_path or not os.path.exists(db_path):
+        return sizes
+    conn = sqlite3.connect(db_path, timeout=5.0)
+    try:
+        tables = _thread_id_tables(conn)
+        if "checkpoints" not in tables:
+            return sizes
+        for thread_id, total in conn.execute(
+            'SELECT thread_id, COALESCE(SUM(LENGTH(checkpoint)), 0) '
+            'FROM "checkpoints" GROUP BY thread_id'
+        ):
+            sizes[thread_id] = total or 0
+    finally:
+        conn.close()
+    return dict(sorted(sizes.items(), key=lambda kv: -kv[1]))
+
+
+def prune_fat_threads(db_path, max_thread_mb=None, keep=None,
+                      active_thread_id=None) -> dict:
+    """Trim every thread whose checkpoint blobs exceed ``max_thread_mb``.
+
+    This closes the gap the other two sweeps leave. ``prune_checkpoints`` bounds how
+    many threads survive but keeps them regardless of size; ``prune_thread_history``
+    bounds size but only for the active thread. So a thread that is abandoned yet
+    still inside the newest ``checkpoint_keep_threads`` is bounded by nothing, and
+    one runaway session can hold gigabytes indefinitely.
+
+    Deleting the *oldest* checkpoints of such a thread is not lossy in any way the
+    REPL can observe: it only ever resumes the newest checkpoint, and the rolling
+    summary and the journal hold what the user needs to remember. The newest
+    checkpoint is always kept, so a resume still replays from a valid state.
+
+    ``keep`` is how many checkpoints to leave in a fat thread (defaults to
+    ``CHECKPOINT_KEEP_PER_THREAD``); the newest ``keep`` rows always survive. If the
+    thread is *still* over budget after that — possible when a single snapshot is
+    huge, since one row can carry a whole history — ``keep`` is halved and the trim
+    repeated until it fits or one row remains, so the budget is a real ceiling
+    rather than a row count that assumes rows are small.
+
+    Returns ``{"threads", "rows", "trimmed"}`` where ``trimmed`` maps thread_id →
+    rows deleted.
+    """
+    max_thread_mb = (CHECKPOINT_MAX_THREAD_MB if max_thread_mb is None
+                     else max_thread_mb)
+    keep = CHECKPOINT_KEEP_PER_THREAD if keep is None else keep
+    result = {"threads": 0, "rows": 0, "trimmed": {}}
+    if not max_thread_mb or keep <= 0:
+        return result
+    if not db_path or not os.path.exists(db_path):
+        return result
+
+    budget = max_thread_mb * 1024 * 1024
+    fat = [
+        (thread_id, size)
+        for thread_id, size in thread_blob_bytes(db_path).items()
+        if size > budget and thread_id != active_thread_id
+    ]
+    if not fat:
+        return result
+
+    conn = sqlite3.connect(db_path, timeout=5.0)
+    try:
+        tables = _thread_id_tables(conn)
+        ranked = [row[1] for row in conn.execute('PRAGMA table_info("checkpoints")')]
+        by_checkpoint_id = "checkpoints" in tables and "checkpoint_id" in ranked
+        for thread_id, _size in fat:
+            keep_n = keep
+            rows = _trim_thread(conn, tables, thread_id, keep_n, by_checkpoint_id)
+            # Size backstop: one snapshot can be huge, so a row count is not a
+            # bound. Halve until the thread fits or a single row is left.
+            while keep_n > 1 and _thread_bytes(conn, thread_id) > budget:
+                keep_n = max(1, keep_n // 2)
+                rows += _trim_thread(conn, tables, thread_id, keep_n, by_checkpoint_id)
+            if rows:
+                result["trimmed"][thread_id] = rows
+                result["rows"] += rows
+                result["threads"] += 1
+                logger.info(
+                    "housekeeping: trimmed %d checkpoint row(s) of abandoned thread "
+                    "%s (kept %d)", rows, thread_id, keep_n,
+                )
+    finally:
+        conn.close()
+    return result
+
+
 def prune_thread_history(db_path, active_thread_id=None, keep=None, max_mb=None,
                          vacuum=False) -> dict:
     """Bound the history of the *live* thread by keeping its newest checkpoints.
@@ -234,38 +398,8 @@ def prune_thread_history(db_path, active_thread_id=None, keep=None, max_mb=None,
         by_checkpoint_id = "checkpoints" in tables and "checkpoint_id" in ranked
 
         def _trim(keep_n: int) -> int:
-            if by_checkpoint_id:
-                safe = [
-                    row[0] for row in conn.execute(
-                        'SELECT checkpoint_id FROM "checkpoints" '
-                        "WHERE thread_id = ? ORDER BY rowid DESC LIMIT ?",
-                        (active_thread_id, keep_n),
-                    )
-                ]
-                if not safe:
-                    return 0
-                placeholders = ", ".join("?" for _ in safe)
-            deleted = 0
-            for table in tables:
-                columns = {
-                    row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')
-                }
-                if by_checkpoint_id and "checkpoint_id" in columns:
-                    cursor = conn.execute(
-                        f'DELETE FROM "{table}" WHERE thread_id = ? '
-                        f"AND checkpoint_id NOT IN ({placeholders})",
-                        (active_thread_id, *safe),
-                    )
-                else:                       # schema drift: trim by recency instead
-                    cursor = conn.execute(
-                        f'DELETE FROM "{table}" WHERE thread_id = ? AND rowid NOT IN ('
-                        f'SELECT rowid FROM "{table}" WHERE thread_id = ? '
-                        "ORDER BY rowid DESC LIMIT ?)",
-                        (active_thread_id, active_thread_id, keep_n),
-                    )
-                deleted += cursor.rowcount or 0
-            conn.commit()
-            return deleted
+            return _trim_thread(conn, tables, active_thread_id, keep_n,
+                                by_checkpoint_id)
 
         result["rows"] = _trim(keep)
         result["kept"] = min(
@@ -315,6 +449,7 @@ def sweep(scratch_dir, checkpoint_db, active_thread_id=None,
     scratch = {"removed": 0, "bytes": 0}
     checkpoints = {"threads": 0, "rows": 0}
     history = {"rows": 0, "bytes": 0, "kept": 0, "freed_mb": 0.0}
+    fat = {"threads": 0, "rows": 0, "trimmed": {}}
     memories = {"removed": 0, "kept": 0}
     try:
         scratch = prune_scratch(scratch_dir)
@@ -324,6 +459,12 @@ def sweep(scratch_dir, checkpoint_db, active_thread_id=None,
         checkpoints = prune_checkpoints(checkpoint_db, active_thread_id=active_thread_id)
     except Exception as e:  # noqa: BLE001
         logger.warning("housekeeping: checkpoint sweep failed: %s", e, exc_info=True)
+    # Runs after the thread sweep, so it only looks at the threads that survived —
+    # the gap it closes is precisely "abandoned but still recent enough to keep".
+    try:
+        fat = prune_fat_threads(checkpoint_db, active_thread_id=active_thread_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("housekeeping: fat-thread trim failed: %s", e, exc_info=True)
     try:
         history = prune_thread_history(
             checkpoint_db, active_thread_id=active_thread_id,
@@ -345,6 +486,11 @@ def sweep(scratch_dir, checkpoint_db, active_thread_id=None,
         summary += (
             f", {history['rows']} checkpoint rows of this session "
             f"({history['freed_mb']:.1f} MB)"
+        )
+    if fat["rows"]:
+        summary += (
+            f", {fat['rows']} checkpoint rows from {fat['threads']} oversized "
+            f"thread(s)"
         )
     if memories["removed"]:
         summary += (
